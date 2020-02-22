@@ -348,8 +348,16 @@ mod tests {
                     (_token!(String, $span), None, None, Some(String::from($literal)))
                 }
             }
-            macro_rules! number { { $val:expr, $span:expr } => ((_token!(Number, $span), None, Some($val), None)); }
-            macro_rules! token { { $kind:ident, $span:expr } => ((_token!($kind, $span), None, None, None)); }
+            macro_rules! number {
+                { $val:expr, $span:expr } => {
+                    (_token!(Number, $span), None, Some($val), None)
+                }
+            }
+            macro_rules! token {
+                { $kind:ident, $span:expr } => {
+                    (_token!($kind, $span), None, None, None)
+                }
+            }
             let source = SourceBuilder::new().lines($input).build();
             let tokens = lex(&source);
             [$($token)*].iter().for_each(|expected: &(Token, Option<String>, Option<usize>, Option<String>)| {
@@ -367,12 +375,12 @@ mod tests {
     }
 
     #[test]
-    fn lex_empty() {
+    fn empty() {
         assert_tokens! { "", [] };
     }
 
     #[test]
-    fn lex_single() {
+    fn single() {
         assert_tokens! { "identifier", [
             identifier! { "identifier", span!(1:1, 1:11) }
         ]};
@@ -382,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn lex_mixed() {
+    fn mixed() {
         assert_tokens! { "mixed 1200", [
             identifier! { "mixed",       span!(1:01, 1:06) },
             number!     { 1200,          span!(1:07, 1:11) },
@@ -399,7 +407,7 @@ mod tests {
         ]};
     }
     #[test]
-    fn lex_multi_line() {
+    fn multi_line() {
         assert_tokens! { "some idents\n10 + 20", [
             identifier! { "some",   span!(1:01, 1:05) },
             identifier! { "idents", span!(1:06, 1:12) },
@@ -409,7 +417,7 @@ mod tests {
         ]};
     }
     #[test]
-    fn lex_all() {
+    fn all() {
         assert_tokens! { "ident 1234567890 ===!(){}[]<>:::+*-,./?~&&&|||^", [
             identifier! { "ident",      span!(1:01, 1:06) },
             number!     { 1234567890,   span!(1:07, 1:17) },
@@ -442,7 +450,7 @@ mod tests {
         ]};
     }
     #[test]
-    fn lex_keyword() {
+    fn keyword() {
         assert_tokens! { "let x = 10;", [
             token!      { Let,       span!(1:01, 1:04) },
             identifier! { "x",       span!(1:05, 1:06) },
@@ -457,7 +465,7 @@ mod tests {
         ]};
     }
     #[test]
-    fn lex_string_literal() {
+    fn string_literal() {
         assert_tokens! { r#" "this should be a whole literal" "#, [
             string! { "this should be a whole literal", span!(1:02, 1:34) },
         ]};

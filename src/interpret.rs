@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn interpret_declaration() {
+    fn declaration() {
         assert_output!(
             "0\n",
             vec![
@@ -225,7 +225,7 @@ mod tests {
         );
     }
     #[test]
-    fn interpret_binary_op() {
+    fn binary_op() {
         assert_output!(
             "20\n",
             vec![stmt!(Print(binary_op!(Add, expr_con!(10), expr_con!(10))))]
