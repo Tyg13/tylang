@@ -1,10 +1,12 @@
 use crate::util::{Anchor, Source, Span};
+use itertools::Itertools;
 use std::collections::HashMap;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum TokenKind {
     Identifier,
     Number,
+    String,
 
     Assign,
     Colon,
@@ -48,6 +50,7 @@ impl std::fmt::Display for TokenKind {
         let repr = match *self {
             Identifier => "identifier",
             Number => "number",
+            String => "string literal",
 
             Assign => "=",
             Colon => ":",
@@ -101,6 +104,7 @@ pub struct Token {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TokenMap {
     tokens: Vec<Token>,
+    pub strings: HashMap<TokenId, String>,
     pub idents: HashMap<TokenId, String>,
     pub numbers: HashMap<TokenId, usize>,
 }
@@ -109,6 +113,7 @@ impl TokenMap {
     pub fn new() -> Self {
         Self {
             tokens: vec![],
+            strings: HashMap::new(),
             idents: HashMap::new(),
             numbers: HashMap::new(),
         }
@@ -129,12 +134,22 @@ impl TokenMap {
         token
     }
 
-    pub fn add_ident(&mut self, id: TokenId, identifier: String) {
-        self.idents.insert(id, identifier);
+    pub fn add_string(&mut self, literal: String, span: Span) -> Token {
+        let token = self.add_token(TokenKind::String, span);
+        self.strings.insert(token.id, literal);
+        token
     }
 
-    pub fn add_number(&mut self, id: TokenId, value: usize) {
-        self.numbers.insert(id, value);
+    pub fn add_ident(&mut self, identifier: String, span: Span) -> Token {
+        let token = self.add_token(TokenKind::Identifier, span);
+        self.idents.insert(token.id, identifier);
+        token
+    }
+
+    pub fn add_number(&mut self, value: usize, span: Span) -> Token {
+        let token = self.add_token(TokenKind::Number, span);
+        self.numbers.insert(token.id, value);
+        token
     }
 }
 
@@ -161,21 +176,18 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn make_token(&mut self, len: usize, kind: TokenKind) -> Token {
+    fn span(&self, len: usize) -> Span {
         let (line, column) = (self.line, self.column);
-        let span = Span {
+        Span {
             start: Anchor { line, column },
             end: Anchor {
                 line,
                 column: column + len,
             },
-        };
-        let token = self.map.add_token(kind, span);
-        self.column = token.span.end.column;
-        token
+        }
     }
 
-    fn scan_token(&mut self, first: char, indexed_chars: &mut TokenStream<'_>) {
+    fn scan_token(&mut self, first: char, indexed_chars: &mut TokenStream<'_>) -> Token {
         macro_rules! special_cases {
             {$($type:ident { $($case:literal => $tokens:expr,)* })+} => {
                 match first {
@@ -187,7 +199,7 @@ impl<'a> Lexer<'a> {
         macro_rules! single {
             ($char:literal, $token:expr) => {{
                 indexed_chars.next();
-                self.make_token(1, $token);
+                self.map.add_token($token, self.span(1))
             }};
         }
         macro_rules! double {
@@ -195,15 +207,14 @@ impl<'a> Lexer<'a> {
                 let single = $tokens.0;
                 let double = $tokens.1;
                 indexed_chars.next();
-                match indexed_chars.peek() {
+                let (kind, len) = match indexed_chars.peek() {
                     Some(&c) if c == $char => {
                         indexed_chars.next();
-                        self.make_token(2, double);
+                        (double, 2)
                     }
-                    _ => {
-                        self.make_token(1, single);
-                    }
-                }
+                    _ => (single, 1),
+                };
+                self.map.add_token(kind, self.span(len))
             }};
         }
         special_cases! {
@@ -235,41 +246,49 @@ impl<'a> Lexer<'a> {
                 '&' => (TokenKind::BitAnd, TokenKind::LogicAnd),
             }
         };
-        if first.is_numeric() {
-            self.scan_number(indexed_chars);
+        if first == '"' {
+            self.scan_string(indexed_chars)
+        } else if first.is_numeric() {
+            self.scan_number(indexed_chars)
         } else if is_ident(first) {
-            self.scan_identifier_or_keyword(indexed_chars);
+            self.scan_identifier_or_keyword(indexed_chars)
         } else {
             dbg!(first, self.line, self.column);
             indexed_chars.next();
-            self.make_token(1, TokenKind::Invalid);
+            self.map.add_token(TokenKind::Invalid, self.span(1))
         }
     }
 
-    fn scan_number(&mut self, indexed_chars: &mut TokenStream<'_>) {
-        use itertools::Itertools;
+    fn scan_string(&mut self, indexed_chars: &mut TokenStream<'_>) -> Token {
+        let _start_of_literal = indexed_chars.next();
+        let literal: String = indexed_chars.take_while(|&c| c != '"').collect();
+        // Length of the literal, plus the two quote characters
+        let len = literal.len() + 2;
+        self.map.add_string(literal, self.span(len))
+    }
+
+    fn scan_number(&mut self, indexed_chars: &mut TokenStream<'_>) -> Token {
         let nums: String = indexed_chars
             .peeking_take_while(|c| c.is_numeric())
             .collect();
 
         let len = nums.len();
         let value = nums.parse().unwrap();
-        let token = self.make_token(len, TokenKind::Number);
-        self.map.add_number(token.id, value);
+        self.map.add_number(value, self.span(len))
     }
 
-    fn scan_identifier_or_keyword(&mut self, indexed_chars: &mut TokenStream<'_>) {
-        use itertools::Itertools;
+    fn scan_identifier_or_keyword(&mut self, indexed_chars: &mut TokenStream<'_>) -> Token {
         let identifier: String = indexed_chars.peeking_take_while(|&c| is_ident(c)).collect();
+        let len = identifier.len();
+        let span = self.span(len);
         let kind = match identifier.as_str() {
             "let" => TokenKind::Let,
             "print" => TokenKind::Print,
             _ => TokenKind::Identifier,
         };
-        let len = identifier.len();
-        let token = self.make_token(len, kind);
-        if let TokenKind::Identifier = kind {
-            self.map.add_ident(token.id, identifier);
+        match kind {
+            TokenKind::Identifier => self.map.add_ident(identifier, span),
+            kind => self.map.add_token(kind, span),
         }
     }
 
@@ -284,7 +303,8 @@ impl<'a> Lexer<'a> {
                     chars.next();
                     continue;
                 }
-                self.scan_token(c, &mut chars);
+                let token = self.scan_token(c, &mut chars);
+                self.column = token.span.end.column;
             }
         }
         self.map
@@ -320,21 +340,28 @@ mod tests {
             }
             macro_rules! identifier {
                 { $ident:expr, $span:expr } => {
-                    (_token!(Identifier, $span), Some(String::from($ident)), None)
+                    (_token!(Identifier, $span), Some(String::from($ident)), None, None)
                 }
             }
-            macro_rules! number { { $val:expr, $span:expr } => ((_token!(Number, $span), None, Some($val))); }
-            macro_rules! token { { $kind:ident, $span:expr } => ((_token!($kind, $span), None, None)); }
+            macro_rules! string {
+                { $literal:literal, $span:expr } => {
+                    (_token!(String, $span), None, None, Some(String::from($literal)))
+                }
+            }
+            macro_rules! number { { $val:expr, $span:expr } => ((_token!(Number, $span), None, Some($val), None)); }
+            macro_rules! token { { $kind:ident, $span:expr } => ((_token!($kind, $span), None, None, None)); }
             let source = SourceBuilder::new().lines($input).build();
             let tokens = lex(&source);
-            [$($token)*].iter().for_each(|expected: &(Token, Option<String>, Option<usize>)| {
+            [$($token)*].iter().for_each(|expected: &(Token, Option<String>, Option<usize>, Option<String>)| {
                 let token = expected.0;
                 let actual = tokens.token(token.id.0);
                 let ident = tokens.idents.get(&token.id).cloned();
                 let number = tokens.numbers.get(&token.id).cloned();
+                let string = tokens.strings.get(&token.id).cloned();
                 assert_eq!(actual, expected.0, "token matches");
                 assert_eq!(ident, expected.1, "identifier matches");
                 assert_eq!(number, expected.2, "number matches");
+                assert_eq!(string, expected.3, "string matches");
             });
         }
     }
@@ -427,6 +454,12 @@ mod tests {
             token!  { Print,     span!(1:01, 1:06) },
             number! { 10,        span!(1:07, 1:09) },
             token!  { SemiColon, span!(1:09, 1:10) },
+        ]};
+    }
+    #[test]
+    fn lex_string_literal() {
+        assert_tokens! { r#" "this should be a whole literal" "#, [
+            string! { "this should be a whole literal", span!(1:02, 1:34) },
         ]};
     }
 }

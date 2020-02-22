@@ -33,7 +33,7 @@ fn main() -> Result<(), Error> {
     }
     let source = SourceBuilder::new().file(input_path).lines(input).build();
     let tokens = lexer::lex(&source);
-    let tree = parser::parse(&source, tokens);
-    interpret::interpret(tree, &mut std::io::stdout());
+    let tree = parser::parse(&source, tokens, &mut std::io::stdout());
+    interpret::interpret(tree, &source, &mut std::io::stdout());
     Ok(())
 }

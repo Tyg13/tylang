@@ -1,6 +1,6 @@
 use crate::lexer::{Token, TokenKind, TokenMap};
 use crate::span;
-use crate::util::{Source, Span};
+use crate::util::{ArmPosition, Source, Span};
 use std::rc::Rc;
 
 #[derive(Debug, PartialEq)]
@@ -14,8 +14,8 @@ impl Tree {
     }
 }
 
-pub fn parse(source: &Source, map: TokenMap) -> Tree {
-    Parser::new(source, map).parse()
+pub fn parse(source: &Source, map: TokenMap, out: &mut dyn std::io::Write) -> Tree {
+    Parser::new(source, map, out).parse()
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -26,44 +26,35 @@ pub enum Error {
 }
 
 impl Parser<'_> {
-    fn report_err(&self, err: Error) {
-        if let Some(token) = self.peek().ok() {
-            if let Some(context) = self.source.line(token.span.start.line) {
-                const PADDING_LEN: usize = 4;
-                let prefix = format!(
-                    "[{file}:{line}:{column}] {padding}",
-                    file = self.source.file(),
-                    line = token.span.start.line,
-                    column = token.span.start.column,
-                    padding = str::repeat(" ", PADDING_LEN)
-                );
-                println!("\n{prefix}{context}", prefix = prefix, context = context);
-                println!(
-                    "{arm}{hand}",
-                    arm = str::repeat("-", prefix.len() + token.span.start.column - 1),
-                    hand = str::repeat(
-                        "^",
-                        token
-                            .span
-                            .end
-                            .column
-                            .saturating_sub(token.span.start.column)
-                    ),
-                );
+    fn report_err(&mut self, err: Error) {
+        || -> std::io::Result<()> {
+            write!(self.out, "\nParseError: ")?;
+            match err {
+                Error::EOF => writeln!(self.out, "unexpected EOF")?,
+                Error::Internal(ref message) => writeln!(self.out, "internal: {}", message)?,
+                Error::UnexpectedToken {
+                    ref expected,
+                    unexpected,
+                } => writeln!(
+                    self.out,
+                    "expected `{}`, got `{}`",
+                    expected, unexpected.kind
+                )?,
             }
-        }
-        let message = match err {
-            Error::EOF => vec![format!("unexpected EOF")],
-            Error::Internal(message) => vec![format!("internal: {}", message)],
-            Error::UnexpectedToken {
-                expected,
-                unexpected,
-            } => vec![
-                format!("expected {}", expected),
-                format!("got `{}`", unexpected.kind),
-            ],
-        };
-        println!("{}", message.join("\n"));
+            if let Some(token) = self.peek().ok() {
+                if let Some(context) = self.source.give_context(
+                    token.span,
+                    match err {
+                        Error::EOF => ArmPosition::End,
+                        _ => ArmPosition::Begin,
+                    },
+                ) {
+                    writeln!(self.out, "{}", context)?;
+                }
+            }
+            Ok(())
+        }()
+        .expect("couldn't write to parser out");
     }
 }
 
@@ -71,6 +62,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub struct Parser<'a> {
     source: &'a Source,
+    out: &'a mut dyn std::io::Write,
     map: TokenMap,
     index: usize,
     backtrack_index: usize,
@@ -79,9 +71,10 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(source: &'a Source, map: TokenMap) -> Self {
+    fn new(source: &'a Source, map: TokenMap, out: &'a mut dyn std::io::Write) -> Self {
         Self {
             source,
+            out,
             map,
             index: 0,
             backtrack_index: 0,
@@ -104,12 +97,27 @@ impl<'a> Parser<'a> {
     }
 
     fn advance(&mut self) -> Result<Token> {
-        let token = self.peek();
+        let token = self.peek()?;
+        self.sync();
         self.index = self
             .index
             .checked_add(1)
             .expect("Overflow in parser token index");
-        token
+        Ok(token)
+    }
+
+    fn advance_until(&mut self, kind: TokenKind) -> Option<Token> {
+        loop {
+            match self.advance() {
+                Ok(token) => {
+                    if token.kind == TokenKind::SemiColon {
+                        return Some(token);
+                    }
+                }
+                Err(Error::EOF) => return None,
+                Err(_) => continue,
+            }
+        }
     }
 
     fn sync(&mut self) {
@@ -121,19 +129,15 @@ impl<'a> Parser<'a> {
     }
 
     fn maybe(&mut self, kind: TokenKind) -> Option<Token> {
-        self.sync();
-        let val = self.expect(kind);
-        if val.is_err() {
-            self.backtrack();
-        }
-        val.ok()
+        self.expect(kind).ok()
     }
 
     fn expect(&mut self, kind: TokenKind) -> Result<Token> {
         let token = self.advance()?;
         if token.kind != kind {
+            self.backtrack();
             return Err(Error::UnexpectedToken {
-                expected: format!(""),
+                expected: kind.to_string(),
                 unexpected: token,
             });
         }
@@ -187,16 +191,24 @@ impl std::fmt::Display for Statement {
 
 impl Parser<'_> {
     fn parse_statements(&mut self) {
+        let mut any_errors = false;
         loop {
             match self.parse_statement() {
                 Ok(Some(statement)) => self.tree.statements.push(statement),
                 Ok(None) => break,
                 Err(err) => {
-                    self.tree.statements.clear();
+                    any_errors = true;
+                    self.backtrack();
                     self.report_err(err);
-                    break;
+                    if let None = self.advance_until(TokenKind::SemiColon) {
+                        break;
+                    }
                 }
             };
+        }
+        // Hack to prevent interpreter running for now
+        if any_errors {
+            self.tree.statements.clear();
         }
     }
 
@@ -221,7 +233,7 @@ impl Parser<'_> {
     }
 
     fn parse_declaration(&mut self) -> Result<Statement> {
-        let _let = self.expect(TokenKind::Let)?;
+        let let_keyword = self.expect(TokenKind::Let)?;
         let var = self.parse_variable()?;
         let initializer = if self.maybe(TokenKind::Assign).is_some() {
             Some(self.parse_expression()?)
@@ -230,7 +242,7 @@ impl Parser<'_> {
         };
         let semi = self.expect(TokenKind::SemiColon)?;
         Ok(Statement {
-            span: span!(_let.span.start, semi.span.end),
+            span: span!(let_keyword.span.start, semi.span.end),
             kind: StatementKind::Declaration { var, initializer },
         })
     }
@@ -499,38 +511,110 @@ impl Parser<'_> {
 mod tests {
     use super::*;
     use crate::lexer::*;
+    use crate::util::SourceBuilder;
+
+    #[test]
+    fn parser_stops_on_eof() {
+        let source = SourceBuilder::new().build();
+        let mut out = Vec::new();
+        let mut parser = Parser::new(&source, TokenMap::new(), &mut out);
+        assert_eq!(parser.advance(), Err(Error::EOF));
+        let old_index = parser.index;
+        assert_eq!(parser.advance(), Err(Error::EOF));
+        let new_index = parser.index;
+        assert_eq!(old_index, new_index);
+    }
 
     macro_rules! token {
         { $map:expr, $kind:ident, $span:expr } => {
             $map.add_token(TokenKind::$kind, $span);
         }
     }
-
     macro_rules! identifier {
         { $map:expr, $name:expr, $span:expr } => {
-            let token = $map.add_token(TokenKind::Identifier, $span);
-            $map.add_ident(token.id, String::from($name));
+            $map.add_ident(String::from($name), $span);
         }
     }
     macro_rules! number {
         { $map:expr, $value:expr, $span:expr } => {
-            let token = $map.add_token(TokenKind::Number, $span);
-            $map.add_number(token.id, $value);
+            $map.add_number($value, $span);
         }
     }
-
     macro_rules! tree {
-        [$($entry:ident { $($args:tt)* },)*] => {{
+        [$source:literal, $($entry:ident { $($args:tt)* },)*] => {{
             let mut map = TokenMap::new();
             $( $entry! { map, $($args)* } )*;
             println!("{:#?}", map);
-            parse(&$crate::util::SourceBuilder::new().build(), map)
+            let mut out = Vec::new();
+            parse(&SourceBuilder::new().lines($source).build(), map, &mut out)
         }}
+    }
+    #[macro_export]
+    macro_rules! stmt {
+        ($span:expr, $kind:ident $($args:tt)+) => {
+            $crate::parser::Statement {
+                span: $span,
+                kind: $crate::parser::StatementKind::$kind $($args)+
+            }
+        };
+    }
+    #[macro_export]
+    macro_rules! expr {
+        ($span:expr, $kind:ident $($args:tt)+) => {
+            $crate::parser::Expression {
+                span: $span,
+                kind: $crate::parser::ExpressionKind::$kind $($args)+
+            }
+        };
+    }
+    #[macro_export]
+    macro_rules! var {
+        ($span:expr, $ident:expr) => {
+            $crate::parser::Variable {
+                span: $span,
+                identifier: String::from($ident),
+            }
+        };
+    }
+    #[macro_export]
+    macro_rules! expr_var {
+        ($span:expr, $ident:expr) => {
+            $crate::expr!($span, Variable($crate::var!($span, $ident)));
+        };
+    }
+    #[macro_export]
+    macro_rules! con {
+        ($span:expr, $value:expr) => {
+            $crate::parser::Constant {
+                span: $span,
+                value: $value,
+            }
+        };
+    }
+    #[macro_export]
+    macro_rules! expr_con {
+        ($span:expr, $value:expr) => {
+            $crate::expr!($span, Constant($crate::con!($span, $value)));
+        };
+    }
+    #[macro_export]
+    macro_rules! binary_op {
+        ($span:expr, $op:ident, $lhs:expr, $rhs:expr) => {
+            $crate::expr!(
+                $span,
+                BinaryOp {
+                    kind: $crate::parser::BinaryOpKind::$op,
+                    lhs: Rc::new($lhs),
+                    rhs: Rc::new($rhs),
+                }
+            )
+        };
     }
 
     #[test]
     fn parse_declaration() {
         let tree = tree![
+            "let x = 10;",
             token      { Let,       span!(1:01, 1:04) },
             identifier { "x",       span!(1:05, 1:06) },
             token      { Assign,    span!(1:07, 1:08) },
@@ -539,25 +623,23 @@ mod tests {
         ];
         assert_eq!(
             tree.statements,
-            vec![Statement {
-                span: span!(1:01, 1:12),
-                kind: StatementKind::Declaration {
-                    var: Variable {
-                        span: span!(1:05, 1:06),
-                        identifier: String::from("x")
+            vec![stmt! {
+                span!(1:01, 1:12),
+                Declaration {
+                    var: var! {
+                        span!(1:05, 1:06),
+                        "x"
                     },
-                    initializer: Some(Expression {
-                        span: span!(1:09, 1:11),
-                        kind: ExpressionKind::Constant(Constant {
-                            span: span!(1:09, 1:11),
-                            value: 10,
-                        }),
+                    initializer: Some(expr_con! {
+                        span!(1:09, 1:11),
+                        10
                     })
                 }
             }],
             "Declaration with constant initializer"
         );
         let tree = tree![
+            "let x = x;",
             token      { Let,       span!(1:01, 1:04) },
             identifier { "x",       span!(1:05, 1:06) },
             token      { Assign,    span!(1:07, 1:08) },
@@ -566,38 +648,33 @@ mod tests {
         ];
         assert_eq!(
             tree.statements,
-            vec![Statement {
-                span: span!(1:01, 1:11),
-                kind: StatementKind::Declaration {
+            vec![stmt! {
+                span!(1:01, 1:11),
+                Declaration {
                     var: Variable {
                         span: span!(1:05, 1:06),
                         identifier: String::from("x")
                     },
-                    initializer: Some(Expression {
-                        span: span!(1:08, 1:09),
-                        kind: ExpressionKind::Variable(Variable {
-                            span: span!(1:08, 1:09),
-                            identifier: String::from("x")
-                        }),
+                    initializer: Some(expr_var! {
+                        span!(1:08, 1:09),
+                        "x"
                     })
                 }
             }],
             "Declaration with variable initializer"
         );
         let tree = tree![
+            "let x;",
             token      { Let,       span!(1:01, 1:04) },
             identifier { "x",       span!(1:05, 1:06) },
             token      { SemiColon, span!(1:06, 1:07) },
         ];
         assert_eq!(
             tree.statements,
-            vec![Statement {
-                span: span!(1:01, 1:07),
-                kind: StatementKind::Declaration {
-                    var: Variable {
-                        span: span!(1:05, 1:06),
-                        identifier: String::from("x"),
-                    },
+            vec![stmt! {
+                span!(1:01, 1:07),
+                Declaration {
+                    var: var!(span!(1:05, 1:06), "x"),
                     initializer: None,
                 }
             }],
@@ -608,6 +685,7 @@ mod tests {
     #[test]
     fn parse_assignment() {
         let tree = tree![
+            "x = x;",
             identifier { "x",       span!(1:01, 1:02) },
             token      { Assign,    span!(1:03, 1:04) },
             identifier { "x",       span!(1:05, 1:06) },
@@ -615,22 +693,16 @@ mod tests {
         ];
         assert_eq!(
             tree.statements,
-            vec![Statement {
-                span: span!(1:01, 1:07),
-                kind: StatementKind::Assignment {
-                    dst: Expression {
-                        span: span!(1:01, 1:02),
-                        kind: ExpressionKind::Variable(Variable {
-                            span: span!(1:01, 1:02),
-                            identifier: String::from("x"),
-                        }),
+            vec![stmt! {
+                span!(1:01, 1:07),
+                Assignment {
+                    dst: expr_var! {
+                        span!(1:01, 1:02),
+                        "x"
                     },
-                    src: Expression {
-                        span: span!(1:05, 1:06),
-                        kind: ExpressionKind::Variable(Variable {
-                            span: span!(1:05, 1:06),
-                            identifier: String::from("x"),
-                        }),
+                    src: expr_var! {
+                        span!(1:05, 1:06),
+                        "x"
                     }
                 }
             }],
@@ -641,6 +713,7 @@ mod tests {
     #[test]
     fn parse_binary_op() {
         let tree = tree![
+            "x = 1 + 1;",
             identifier { "x",       span!(1:01, 1:02) },
             token      { Assign,    span!(1:03, 1:04) },
             number     { 1,         span!(1:05, 1:06) },
@@ -650,42 +723,151 @@ mod tests {
         ];
         assert_eq!(
             tree.statements,
-            vec![Statement {
-                span: span!(1:01, 1:11),
-                kind: StatementKind::Assignment {
-                    dst: Expression {
-                        span: span!(1:01, 1:02),
-                        kind: ExpressionKind::Variable(Variable {
-                            span: span!(1:01, 1:02),
-                            identifier: String::from("x"),
-                        })
+            vec![stmt! {
+                span!(1:01, 1:11),
+                Assignment {
+                    dst: expr_var! {
+                        span!(1:01, 1:02),
+                        "x"
                     },
-                    src: Expression {
-                        span: span!(1:05, 1:10),
-                        kind: ExpressionKind::BinaryOp {
-                            kind: BinaryOpKind::Add,
-                            lhs: Rc::new(Expression {
-                                span: span!(1:05, 1:06),
-                                kind: ExpressionKind::Constant(Constant {
-                                    span: span!(1:05, 1:06),
-                                    value: 1,
-                                }),
-                            }),
-                            rhs: Rc::new(Expression {
-                                span: span!(1:09, 1:10),
-                                kind: ExpressionKind::Constant(Constant {
-                                    span: span!(1:09, 1:10),
-                                    value: 1,
-                                }),
-                            }),
+                    src: binary_op! {
+                        span!(1:05, 1:10),
+                        Add,
+                        expr_con! {
+                            span!(1:05, 1:06),
+                            1
+                        },
+                        expr_con! {
+                            span!(1:09, 1:10),
+                            1
                         }
                     }
                 }
             }],
-            "x = 1 + 1"
+            "Basic addition"
         );
     }
 
     #[test]
-    fn parse_precedence() {}
+    fn parse_precedence() {
+        let tree = tree![
+            "x = 2 + 2*2;",
+            identifier { "x",       span!(1:01, 1:02) },
+            token      { Assign,    span!(1:03, 1:04) },
+            number     { 2,         span!(1:05, 1:06) },
+            token      { Plus,      span!(1:07, 1:08) },
+            number     { 2,         span!(1:09, 1:10) },
+            token      { Star,      span!(1:10, 1:11) },
+            number     { 2,         span!(1:11, 1:12) },
+            token      { SemiColon, span!(1:12, 1:13) },
+        ];
+        assert_eq!(
+            tree.statements,
+            vec![stmt! {
+                span!(1:01, 1:13),
+                Assignment {
+                    dst: expr_var! {
+                         span!(1:01, 1:02),
+                         "x"
+                    },
+                    src: binary_op! {
+                        span!(1:05, 1:12),
+                        Add,
+                        expr_con!(span!(1:05, 1:06), 2),
+                        binary_op! {
+                            span!(1:09, 1:12),
+                            Mul,
+                            expr_con!(span!(1:09, 1:10), 2),
+                            expr_con!(span!(1:11, 1:12), 2)
+                        }
+                    }
+                }
+            }],
+            "2 + 2 * 2 groups as 2 + (2 * 2)"
+        );
+        let tree = tree![
+            "x = 2 * 2+2;",
+            identifier { "x",       span!(1:01, 1:02) },
+            token      { Assign,    span!(1:03, 1:04) },
+            number     { 2,         span!(1:05, 1:06) },
+            token      { Star,      span!(1:07, 1:08) },
+            number     { 2,         span!(1:09, 1:10) },
+            token      { Plus,      span!(1:10, 1:11) },
+            number     { 2,         span!(1:11, 1:12) },
+            token      { SemiColon, span!(1:12, 1:13) },
+        ];
+        assert_eq!(
+            tree.statements,
+            vec![stmt! {
+                span!(1:01, 1:13),
+                Assignment {
+                    dst: expr_var! {
+                         span!(1:01, 1:02),
+                         "x"
+                    },
+                    src: binary_op! {
+                        span!(1:05, 1:12),
+                        Add,
+                        binary_op! {
+                            span!(1:05, 1:10),
+                            Mul,
+                            expr_con!(span!(1:05, 1:06), 2),
+                            expr_con!(span!(1:09, 1:10), 2)
+                        },
+                        expr_con!(span!(1:11, 1:12), 2)
+                    }
+                }
+            }],
+            "2 * 2 + 2 groups as (2 * 2) + 2"
+        );
+        let tree = tree![
+            "x = (2 + 2)*2;",
+            identifier { "x",        span!(1:01, 1:02) },
+            token      { Assign,     span!(1:03, 1:04) },
+            token      { LeftParen,  span!(1:05, 1:06) },
+            number     { 2,          span!(1:06, 1:07) },
+            token      { Plus,       span!(1:08, 1:09) },
+            number     { 2,          span!(1:10, 1:11) },
+            token      { RightParen, span!(1:11, 1:12) },
+            token      { Star,       span!(1:12, 1:13) },
+            number     { 2,          span!(1:13, 1:14) },
+            token      { SemiColon,  span!(1:14, 1:15) },
+        ];
+        assert_eq!(
+            tree.statements,
+            vec![stmt! {
+                span!(1:01, 1:15),
+                Assignment {
+                    dst: expr_var! {
+                         span!(1:01, 1:02),
+                         "x"
+                    },
+                    src: binary_op! {
+                        span!(1:05, 1:14),
+                        Mul,
+                        expr! {
+                            span!(1:05, 1:12),
+                            Group(Rc::new(binary_op! {
+                                span!(1:06, 1:11),
+                                Add,
+                                expr_con!(span!(1:06, 1:07), 2),
+                                expr_con!(span!(1:10, 1:11), 2)
+                            }))
+                        },
+                        expr_con!(span!(1:13, 1:14), 2)
+                    }
+                }
+            }],
+            "(2 * 2) + 2 groups as expected"
+        );
+    }
+    #[test]
+    fn parse_error() {
+        let tree = tree![
+            "let=;",
+            token      { Let,       span!(1:01, 1:04) },
+            token      { Assign,    span!(1:04, 1:05) },
+            token      { SemiColon, span!(1:05, 1:06) },
+        ];
+    }
 }

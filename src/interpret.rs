@@ -1,7 +1,6 @@
 use crate::parser;
-use crate::util::Span;
+use crate::util::{ArmPosition, Source, Span};
 use std::collections::HashMap;
-use std::io;
 use std::rc::Rc;
 
 struct Variable {
@@ -11,7 +10,6 @@ struct Variable {
 #[derive(Clone, Debug, PartialEq)]
 enum ErrorKind {
     UndefinedVariable(String),
-    Io(String),
 }
 
 impl std::fmt::Display for ErrorKind {
@@ -19,7 +17,6 @@ impl std::fmt::Display for ErrorKind {
         use ErrorKind::*;
         match self {
             UndefinedVariable(var) => write!(f, "undefined variable `{}`", var),
-            Io(err) => write!(f, "{}", err),
         }
     }
 }
@@ -30,27 +27,33 @@ struct Error {
     kind: ErrorKind,
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "InterpretError at {span}: {kind}",
-            span = self.span,
-            kind = self.kind,
-        )
+type Result<T> = std::result::Result<T, Error>;
+
+impl Interpreter<'_> {
+    fn report_err(&mut self, err: Error) {
+        || -> std::io::Result<()> {
+            writeln!(self.out, "InterpretError: {kind}", kind = err.kind)?;
+            if let Some(context) = self.source.give_context(err.span, ArmPosition::Begin) {
+                writeln!(self.out, "{}", context)?;
+            }
+            Ok(())
+        }()
+        .expect("Couldn't write to interpreter out!")
     }
 }
 
 struct Interpreter<'a> {
     variables: HashMap<String, Variable>,
     tree: parser::Tree,
-    out: &'a mut dyn io::Write,
+    source: &'a Source,
+    out: &'a mut dyn std::io::Write,
 }
 
 impl<'a> Interpreter<'a> {
-    fn new(tree: parser::Tree, out: &'a mut dyn io::Write) -> Self {
+    fn new(tree: parser::Tree, source: &'a Source, out: &'a mut dyn std::io::Write) -> Self {
         Self {
             tree,
+            source,
             out,
             variables: HashMap::new(),
         }
@@ -61,7 +64,7 @@ impl<'a> Interpreter<'a> {
             let statement = self.tree.statements[index].clone();
             match self.interpret_statement(statement) {
                 Err(err) => {
-                    println!("{}", err);
+                    self.report_err(err);
                     break;
                 }
                 _ => {}
@@ -69,7 +72,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn lookup(&mut self, var: &parser::Variable) -> Result<usize, Error> {
+    fn lookup(&mut self, var: &parser::Variable) -> Result<usize> {
         match self.variables.get(&var.identifier) {
             Some(var) => Ok(var.value),
             None => Err(Error {
@@ -84,7 +87,7 @@ impl<'a> Interpreter<'a> {
         kind: parser::BinaryOpKind,
         lhs: &Rc<parser::Expression>,
         rhs: &Rc<parser::Expression>,
-    ) -> Result<usize, Error> {
+    ) -> Result<usize> {
         use parser::BinaryOpKind::*;
         let lhs = self.expr_value(&*lhs)?;
         let rhs = self.expr_value(&*rhs)?;
@@ -96,7 +99,7 @@ impl<'a> Interpreter<'a> {
         })
     }
 
-    fn expr_value(&mut self, expr: &parser::Expression) -> Result<usize, Error> {
+    fn expr_value(&mut self, expr: &parser::Expression) -> Result<usize> {
         use parser::ExpressionKind::*;
         match &expr.kind {
             Variable(var) => self.lookup(&var),
@@ -106,7 +109,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn interpret_statement(&mut self, statement: parser::Statement) -> Result<(), Error> {
+    fn interpret_statement(&mut self, statement: parser::Statement) -> Result<()> {
         use parser::StatementKind::*;
         match statement.kind.clone() {
             Declaration {
@@ -132,17 +135,10 @@ impl<'a> Interpreter<'a> {
                 match self.variables.get_mut(identifier) {
                     Some(var) => var.value = value,
                     None => {
-                        write!(
-                            self.out,
-                            "Error cannot assign undeclared variable {var} at ({line}, {column})",
-                            var = identifier,
-                            line = dst.span.start.line,
-                            column = dst.span.start.column,
-                        )
-                        .map_err(|e| Error {
+                        return Err(Error {
                             span: statement.span,
-                            kind: ErrorKind::Io(e.to_string()),
-                        })?;
+                            kind: ErrorKind::UndefinedVariable(identifier.clone()),
+                        });
                     }
                 }
             }
@@ -156,68 +152,51 @@ impl<'a> Interpreter<'a> {
     }
 }
 
-pub fn interpret<'a>(tree: parser::Tree, out: &'a mut dyn io::Write) {
-    Interpreter::new(tree, out).interpret()
+pub fn interpret(tree: parser::Tree, source: &Source, out: &mut dyn std::io::Write) {
+    Interpreter::new(tree, source, out).interpret()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{self, *};
-    use crate::span;
+    use crate::util::SourceBuilder;
+    use crate::{binary_op, expr_con, expr_var, span, stmt, var};
 
     macro_rules! null_span { () => (span!(0:0, 0:0)); }
     macro_rules! stmt {
-        ($kind:ident $($args:tt)*) => {
-            parser::Statement {
-                span: null_span!(),
-                kind: StatementKind::$kind $($args)*,
-            }
-        };
-    }
-    macro_rules! expr {
-        ($kind:ident $($args:tt)*) => {
-            parser::Expression {
-                span: null_span!(),
-                kind: ExpressionKind::$kind $($args)*,
-            }
+        ($kind:ident $($args:tt),*) => {
+            $crate::stmt!(null_span!(), $kind $($args),*);
         };
     }
     macro_rules! var {
         ($ident:expr) => {
-            parser::Variable {
-                span: null_span!(),
-                identifier: String::from($ident),
-            }
+            $crate::var!(null_span!(), $ident);
         };
     }
-    macro_rules! con {
+    macro_rules! expr_var {
+        ($ident:expr) => {
+            $crate::expr_var!(null_span!(), $ident);
+        };
+    }
+    macro_rules! expr_con {
         ($value:expr) => {
-            parser::Constant {
-                span: null_span!(),
-                value: $value,
-            }
+            $crate::expr_con!(null_span!(), $value);
         };
     }
-
     macro_rules! binary_op {
         ($op:ident, $lhs:expr, $rhs:expr) => {
-            expr!(BinaryOp {
-                kind: BinaryOpKind::$op,
-                lhs: Rc::new($lhs),
-                rhs: Rc::new($rhs),
-            })
+            $crate::binary_op!(null_span!(), $op, $lhs, $rhs);
         };
     }
 
     macro_rules! assert_output {
         ($expected:expr, $statements:expr$(, $rest:tt)*) => {{
-            let tree = Tree {
+            let tree = parser::Tree {
                 statements: $statements,
             };
             let mut buff = Vec::new();
-            interpret(tree, &mut buff);
-            let out = String::from_utf8(buff).expect("Non UTF-8 parser output!");
+            interpret(tree, &SourceBuilder::new().build(), &mut buff);
+            let out = String::from_utf8(buff).expect("Non UTF-8 interpreter output!");
             assert_eq!($expected, out$(, $rest)*);
         }};
     }
@@ -231,7 +210,7 @@ mod tests {
                     var: var!("x"),
                     initializer: None,
                 }),
-                stmt!(Print(expr!(Variable(var!("x"))))),
+                stmt!(Print(expr_var!("x"))),
             ]
         );
         assert_output!(
@@ -239,9 +218,9 @@ mod tests {
             vec![
                 stmt!(Declaration {
                     var: var!("x"),
-                    initializer: Some(expr!(Constant(con!(10)))),
+                    initializer: Some(expr_con!(10)),
                 }),
-                stmt!(Print(expr!(Variable(var!("x"))))),
+                stmt!(Print(expr_var!("x"))),
             ]
         );
     }
@@ -249,19 +228,11 @@ mod tests {
     fn interpret_binary_op() {
         assert_output!(
             "20\n",
-            vec![stmt!(Print(binary_op!(
-                Add,
-                expr!(Constant(con!(10))),
-                expr!(Constant(con!(10)))
-            )))]
+            vec![stmt!(Print(binary_op!(Add, expr_con!(10), expr_con!(10))))]
         );
         assert_output!(
             "20\n",
-            vec![stmt!(Print(binary_op!(
-                Add,
-                expr!(Constant(con!(10))),
-                expr!(Constant(con!(10)))
-            )))]
+            vec![stmt!(Print(binary_op!(Add, expr_con!(10), expr_con!(10))))]
         );
     }
 }

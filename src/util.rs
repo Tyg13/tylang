@@ -81,6 +81,11 @@ impl SourceBuilder {
     }
 }
 
+pub enum ArmPosition {
+    Begin,
+    End,
+}
+
 impl Source {
     pub fn lines(&self) -> &Vec<String> {
         &self.lines
@@ -92,5 +97,31 @@ impl Source {
 
     pub fn file(&self) -> String {
         self.file.clone()
+    }
+
+    pub fn give_context(&self, span: Span, arm: ArmPosition) -> Option<String> {
+        const PADDING_LEN: usize = 4;
+        let context = self.line(span.end.line)?;
+        let prefix = format!(
+            "[{file}:{line}:{column}]{padding}",
+            file = self.file,
+            line = span.start.line,
+            column = span.start.column,
+            padding = str::repeat(" ", PADDING_LEN)
+        );
+        let column = match arm {
+            ArmPosition::Begin => span.start.column,
+            ArmPosition::End => span.end.column,
+        };
+        Some(format!(
+            "{prefix}{context}\n{arm}{hand}",
+            prefix = prefix,
+            context = context,
+            arm = str::repeat("-", prefix.len() + column - 1),
+            hand = str::repeat(
+                "^",
+                std::cmp::max(1, span.end.column.saturating_sub(column))
+            ),
+        ))
     }
 }
