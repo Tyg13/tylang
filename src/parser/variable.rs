@@ -37,10 +37,23 @@ impl Parser<'_> {
                 token
             )))
     }
-    pub fn parse_variable(&mut self) -> Result<Variable> {
+    pub(super) fn parse_variable(&mut self) -> Result<Variable> {
         let token = self.expect(TokenKind::Identifier)?;
         let span = token.span;
         let identifier = self.ident(token)?;
         Ok(Variable { span, identifier })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[macro_export]
+    macro_rules! var {
+        ($span:expr, $ident:expr) => {
+            $crate::parser::Variable {
+                span: $span,
+                identifier: String::from($ident),
+            }
+        };
     }
 }

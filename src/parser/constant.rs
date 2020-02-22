@@ -34,10 +34,23 @@ impl Parser<'_> {
             .cloned()
             .ok_or(Error::Internal(format!("{:#?} is not a number", token)))
     }
-    pub fn parse_constant(&mut self) -> Result<Constant> {
+    pub(super) fn parse_constant(&mut self) -> Result<Constant> {
         let token = self.expect(TokenKind::Number)?;
         let span = token.span;
         let value = self.number(token)?;
         Ok(Constant { span, value })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[macro_export]
+    macro_rules! con {
+        ($span:expr, $value:expr) => {
+            $crate::parser::Constant {
+                span: $span,
+                value: $value,
+            }
+        };
     }
 }

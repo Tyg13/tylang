@@ -90,6 +90,30 @@ enum Precedence {
 }
 
 impl Parser<'_> {
+    pub(super) fn parse_expression(&mut self) -> Result<Expression> {
+        let token = self.peek()?;
+        let expr = match token.kind {
+            TokenKind::LeftParen => {
+                let precedence = self.precedence;
+                self.precedence = 0;
+                let left_paren = self.expect(TokenKind::LeftParen)?;
+                let expr = self.parse_expression()?;
+                let right_paren = self.expect(TokenKind::RightParen)?;
+                self.precedence = precedence;
+                Expression {
+                    span: span!(left_paren.span.start, right_paren.span.end),
+                    kind: ExpressionKind::Group(Rc::new(expr)),
+                }
+            }
+            TokenKind::Identifier => self.parse_variable().map(Expression::from)?,
+            TokenKind::Number => self.parse_constant().map(Expression::from)?,
+            _ => {
+                return Err(Error::UnexpectedToken(String::from("expression")));
+            }
+        };
+        Ok(self.maybe_parse_binary_op_of_precedence(expr, Precedence::Higher)?)
+    }
+
     fn maybe_parse_binary_op_of_precedence(
         &mut self,
         expr: Expression,
@@ -111,33 +135,6 @@ impl Parser<'_> {
         Ok(expr)
     }
 
-    pub fn parse_expression(&mut self) -> Result<Expression> {
-        let token = self.peek()?;
-        let expr = match token.kind {
-            TokenKind::LeftParen => {
-                let precedence = self.precedence;
-                self.precedence = 0;
-                let left_paren = self.expect(TokenKind::LeftParen)?;
-                let expr = self.parse_expression()?;
-                let right_paren = self.expect(TokenKind::RightParen)?;
-                self.precedence = precedence;
-                Expression {
-                    span: span!(left_paren.span.start, right_paren.span.end),
-                    kind: ExpressionKind::Group(Rc::new(expr)),
-                }
-            }
-            TokenKind::Identifier => self.parse_variable().map(Expression::from)?,
-            TokenKind::Number => self.parse_constant().map(Expression::from)?,
-            _ => {
-                return Err(Error::UnexpectedToken {
-                    expected: String::from("expression"),
-                    unexpected: token,
-                });
-            }
-        };
-        Ok(self.maybe_parse_binary_op_of_precedence(expr, Precedence::Higher)?)
-    }
-
     fn parse_binary_op(&mut self, lhs: Expression, kind: BinaryOpKind) -> Result<Expression> {
         let _ = self.advance()?;
         let lhs = Rc::new(lhs);
@@ -154,10 +151,7 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        assert_empty, binary_op, expr, expr_con, expr_var, identifier, number, span, stmt, token,
-        tree,
-    };
+    use crate::{assert_empty, binary_op, expr, expr_con, expr_var, span, stmt, tree};
 
     #[test]
     fn binary_op() {
@@ -313,5 +307,40 @@ mod tests {
             }],
             "(2 * 2) + 2 groups as expected"
         );
+    }
+
+    #[macro_export]
+    macro_rules! expr {
+        ($span:expr, $kind:ident $($args:tt)+) => {
+            $crate::parser::Expression {
+                span: $span,
+                kind: $crate::parser::ExpressionKind::$kind $($args)+
+            }
+        };
+    }
+    #[macro_export]
+    macro_rules! expr_var {
+        ($span:expr, $ident:expr) => {
+            $crate::expr!($span, Variable($crate::var!($span, $ident)));
+        };
+    }
+    #[macro_export]
+    macro_rules! expr_con {
+        ($span:expr, $value:expr) => {
+            $crate::expr!($span, Constant($crate::con!($span, $value)));
+        };
+    }
+    #[macro_export]
+    macro_rules! binary_op {
+        ($span:expr, $op:ident, $lhs:expr, $rhs:expr) => {
+            $crate::expr!(
+                $span,
+                BinaryOp {
+                    kind: $crate::parser::BinaryOpKind::$op,
+                    lhs: Rc::new($lhs),
+                    rhs: Rc::new($rhs),
+                }
+            )
+        };
     }
 }

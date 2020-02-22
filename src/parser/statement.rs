@@ -45,7 +45,7 @@ impl std::fmt::Display for Statement {
 }
 
 impl Parser<'_> {
-    pub fn parse_statements(&mut self) {
+    pub(super) fn parse_statements(&mut self) {
         let mut any_errors = false;
         loop {
             match self.parse_statement() {
@@ -78,10 +78,7 @@ impl Parser<'_> {
             TokenKind::Print => self.parse_print(),
             TokenKind::Identifier => self.parse_assignment(),
             _ => {
-                return Err(Error::UnexpectedToken {
-                    expected: String::from("statement"),
-                    unexpected: token,
-                });
+                return Err(Error::UnexpectedToken(String::from("statement")));
             }
         }
         .map(Some)
@@ -127,9 +124,7 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        assert_empty, expr_con, expr_var, identifier, number, span, stmt, token, tree, var,
-    };
+    use crate::{assert_empty, expr_con, expr_var, span, stmt, tree, var};
 
     #[test]
     fn declaration() {
@@ -232,5 +227,15 @@ mod tests {
             }],
             "variable assignment to variable"
         );
+    }
+
+    #[macro_export]
+    macro_rules! stmt {
+        ($span:expr, $kind:ident $($args:tt)+) => {
+            $crate::parser::Statement {
+                span: $span,
+                kind: $crate::parser::StatementKind::$kind $($args)+
+            }
+        };
     }
 }

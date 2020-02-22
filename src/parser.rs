@@ -9,7 +9,7 @@ mod expression;
 mod statement;
 mod variable;
 pub use constant::*;
-pub use error::*;
+use error::*;
 pub use expression::*;
 pub use statement::*;
 pub use variable::*;
@@ -81,7 +81,7 @@ impl<'a> Parser<'a> {
         loop {
             match self.advance() {
                 Ok(token) => {
-                    if token.kind == TokenKind::SemiColon {
+                    if token.kind == kind {
                         return Some(token);
                     }
                 }
@@ -107,10 +107,7 @@ impl<'a> Parser<'a> {
         let token = self.advance()?;
         if token.kind != kind {
             self.backtrack();
-            return Err(Error::UnexpectedToken {
-                expected: kind.to_string(),
-                unexpected: token,
-            });
+            return Err(Error::UnexpectedToken(kind.to_string()));
         }
         Ok(token)
     }
@@ -133,31 +130,28 @@ mod tests {
         let new_index = parser.index;
         assert_eq!(old_index, new_index);
     }
-
-    #[macro_export]
-    macro_rules! token {
-        { $map:expr, $kind:ident, $span:expr } => {
-            $map.add_token(TokenKind::$kind, $span);
-        }
-    }
-    #[macro_export]
-    macro_rules! identifier {
-        { $map:expr, $name:expr, $span:expr } => {
-            $map.add_ident(String::from($name), $span);
-        }
-    }
-    #[macro_export]
-    macro_rules! number {
-        { $map:expr, $value:expr, $span:expr } => {
-            $map.add_number($value, $span);
-        }
-    }
     #[macro_export]
     macro_rules! tree {
         [$source:literal, $($entry:ident { $($args:tt)* },)*] => {{
             let mut map = $crate::lexer::TokenMap::new();
-            $( $entry! { map, $($args)* } )*;
-            println!("{:#?}", map);
+            macro_rules! token {
+                { $kind:ident, $span:expr } => {
+                    map.add_token(TokenKind::$kind, $span);
+                }
+            }
+            #[allow(unused_macros)]
+            macro_rules! identifier {
+                { $name:expr, $span:expr } => {
+                    map.add_ident(String::from($name), $span);
+                }
+            }
+            #[allow(unused_macros)]
+            macro_rules! number {
+                { $value:expr, $span:expr } => {
+                    map.add_number($value, $span);
+                }
+            }
+            $( $entry! { $($args)* } )*;
             let mut out = Vec::new();
             let tree = $crate::parser::parse(&$crate::util::SourceBuilder::new()
                 .lines($source)
@@ -167,67 +161,6 @@ mod tests {
             );
             (tree, String::from_utf8(out).expect("Non UTF-8 parser output!"))
         }}
-    }
-    #[macro_export]
-    macro_rules! stmt {
-        ($span:expr, $kind:ident $($args:tt)+) => {
-            $crate::parser::Statement {
-                span: $span,
-                kind: $crate::parser::StatementKind::$kind $($args)+
-            }
-        };
-    }
-    #[macro_export]
-    macro_rules! expr {
-        ($span:expr, $kind:ident $($args:tt)+) => {
-            $crate::parser::Expression {
-                span: $span,
-                kind: $crate::parser::ExpressionKind::$kind $($args)+
-            }
-        };
-    }
-    #[macro_export]
-    macro_rules! var {
-        ($span:expr, $ident:expr) => {
-            $crate::parser::Variable {
-                span: $span,
-                identifier: String::from($ident),
-            }
-        };
-    }
-    #[macro_export]
-    macro_rules! expr_var {
-        ($span:expr, $ident:expr) => {
-            $crate::expr!($span, Variable($crate::var!($span, $ident)));
-        };
-    }
-    #[macro_export]
-    macro_rules! con {
-        ($span:expr, $value:expr) => {
-            $crate::parser::Constant {
-                span: $span,
-                value: $value,
-            }
-        };
-    }
-    #[macro_export]
-    macro_rules! expr_con {
-        ($span:expr, $value:expr) => {
-            $crate::expr!($span, Constant($crate::con!($span, $value)));
-        };
-    }
-    #[macro_export]
-    macro_rules! binary_op {
-        ($span:expr, $op:ident, $lhs:expr, $rhs:expr) => {
-            $crate::expr!(
-                $span,
-                BinaryOp {
-                    kind: $crate::parser::BinaryOpKind::$op,
-                    lhs: Rc::new($lhs),
-                    rhs: Rc::new($rhs),
-                }
-            )
-        };
     }
     #[macro_export]
     macro_rules! assert_empty {
