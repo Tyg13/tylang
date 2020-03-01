@@ -53,22 +53,22 @@ pub struct Source {
 
 pub struct SourceBuilder {
     file: Option<String>,
-    lines: Vec<String>,
+    source: Option<String>,
 }
 
 impl SourceBuilder {
     pub fn new() -> Self {
         Self {
             file: None,
-            lines: vec![],
+            source: None,
         }
     }
     pub fn file<S: AsRef<str>>(mut self, file: S) -> Self {
         self.file = Some(String::from(file.as_ref()));
         self
     }
-    pub fn lines<S: AsRef<str>>(mut self, input: S) -> Self {
-        self.lines = input.as_ref().lines().map(String::from).collect();
+    pub fn source<S: AsRef<str>>(mut self, input: S) -> Self {
+        self.source = Some(String::from(input.as_ref()));
         self
     }
     pub fn build(self) -> Source {
@@ -76,7 +76,12 @@ impl SourceBuilder {
             .file
             .map(|s| if s == "-" { String::from("<stdin>") } else { s })
             .unwrap_or(String::from("<err>"));
-        let lines = self.lines;
+        let lines = self
+            .source
+            .unwrap_or(String::new())
+            .lines()
+            .map(|line| line.to_string())
+            .collect();
         Source { file, lines }
     }
 }

@@ -7,7 +7,12 @@ pub enum BinaryOpKind {
     Sub,
     Mul,
     Div,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExpressionKind {
     Variable(Variable),
@@ -69,8 +74,16 @@ impl TryFrom<TokenKind> for BinaryOp {
                 kind: Lt,
                 precedence: 1,
             },
+            TokenKind::LeftAngleEquals => BinaryOp {
+                kind: Lte,
+                precedence: 1,
+            },
             TokenKind::RightAngle => BinaryOp {
                 kind: Gt,
+                precedence: 1,
+            },
+            TokenKind::RightAngleEquals => BinaryOp {
+                kind: Gte,
                 precedence: 1,
             },
             TokenKind::Plus => BinaryOp {

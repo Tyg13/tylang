@@ -33,7 +33,7 @@ fn main() -> Result<(), Error> {
     } else {
         input = fs::read_to_string(input_path).map_err(|e| Error::ReadingInput(e))?;
     }
-    let source = SourceBuilder::new().file(input_path).lines(input).build();
+    let source = SourceBuilder::new().file(input_path).source(input).build();
     let tokens = lexer::lex(&source);
     let tree = parser::parse(&source, tokens, &mut std::io::stdout());
     match matches.value_of("ACTION") {

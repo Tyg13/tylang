@@ -157,7 +157,7 @@ fn is_ident(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-type TokenStream<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
 
 struct Lexer<'a> {
     source: &'a Source,
@@ -170,8 +170,8 @@ impl<'a> Lexer<'a> {
     fn new(source: &'a Source) -> Self {
         Self {
             source,
-            line: 0,
-            column: 0,
+            line: 1,
+            column: 1,
             map: TokenMap::new(),
         }
     }
@@ -187,7 +187,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn scan_token(&mut self, first: char, indexed_chars: &mut TokenStream<'_>) {
+    fn scan_token(&mut self, first: char, chars: &mut Chars<'_>) {
         use TokenKind::*;
         macro_rules! scan {
             {$($type:ident { $($case:literal => $tokens:expr,)* }),+, { $rest:expr }} => {
@@ -202,7 +202,7 @@ impl<'a> Lexer<'a> {
         }
         macro_rules! single {
             ($char:literal, $token:expr) => {{
-                indexed_chars.next();
+                chars.next();
                 ($token, 1)
             }};
         }
@@ -210,10 +210,10 @@ impl<'a> Lexer<'a> {
             ($char:literal, $tokens:expr) => {{
                 let single = $tokens.0;
                 let double = $tokens.1;
-                indexed_chars.next();
-                match indexed_chars.peek() {
+                chars.next();
+                match chars.peek() {
                     Some(&c) if c == $char => {
-                        indexed_chars.next();
+                        chars.next();
                         (double, 2)
                     }
                     _ => (single, 1),
@@ -250,14 +250,14 @@ impl<'a> Lexer<'a> {
             },
             {
                 if first == '"' {
-                    self.scan_string(indexed_chars)
+                    self.scan_string(chars)
                 } else if first.is_numeric() {
-                    self.scan_number(indexed_chars)
+                    self.scan_number(chars)
                 } else if is_ident(first) {
-                    self.scan_identifier_or_keyword(indexed_chars)
+                    self.scan_identifier_or_keyword(chars)
                 } else {
                     dbg!(first, self.line, self.column);
-                    indexed_chars.next();
+                    chars.next();
                     self.map.add_token(TokenKind::Invalid, self.span(1))
                 }
             }
@@ -265,26 +265,24 @@ impl<'a> Lexer<'a> {
         self.column = token.span.end.column;
     }
 
-    fn scan_string(&mut self, indexed_chars: &mut TokenStream<'_>) -> Token {
-        let _start_of_literal = indexed_chars.next();
-        let literal: String = indexed_chars.take_while(|&c| c != '"').collect();
+    fn scan_string(&mut self, chars: &mut Chars<'_>) -> Token {
+        let _start_of_literal = chars.next();
+        let literal: String = chars.take_while(|&c| c != '"').collect();
         // Length of the literal, plus the two quote characters
         let len = literal.len() + 2;
         self.map.add_string(literal, self.span(len))
     }
 
-    fn scan_number(&mut self, indexed_chars: &mut TokenStream<'_>) -> Token {
-        let nums: String = indexed_chars
-            .peeking_take_while(|c| c.is_numeric())
-            .collect();
+    fn scan_number(&mut self, chars: &mut Chars<'_>) -> Token {
+        let nums: String = chars.peeking_take_while(|c| c.is_numeric()).collect();
 
         let len = nums.len();
         let value = nums.parse().unwrap();
         self.map.add_number(value, self.span(len))
     }
 
-    fn scan_identifier_or_keyword(&mut self, indexed_chars: &mut TokenStream<'_>) -> Token {
-        let identifier: String = indexed_chars.peeking_take_while(|&c| is_ident(c)).collect();
+    fn scan_identifier_or_keyword(&mut self, chars: &mut Chars<'_>) -> Token {
+        let identifier: String = chars.peeking_take_while(|&c| is_ident(c)).collect();
         let len = identifier.len();
         let span = self.span(len);
         let kind = keyword(&identifier).unwrap_or(TokenKind::Identifier);
@@ -296,7 +294,6 @@ impl<'a> Lexer<'a> {
 
     fn lex(mut self) -> TokenMap {
         for line in self.source.lines() {
-            self.line += 1;
             self.column = 1;
             let mut chars = line.chars().peekable();
             while let Some(&c) = chars.peek() {
@@ -307,6 +304,7 @@ impl<'a> Lexer<'a> {
                 }
                 self.scan_token(c, &mut chars);
             }
+            self.line += 1;
         }
         self.map
     }
@@ -359,7 +357,7 @@ mod tests {
                     (_token!($kind, $span), None, None, None)
                 }
             }
-            let source = SourceBuilder::new().lines($input).build();
+            let source = SourceBuilder::new().source($input).build();
             let tokens = lex(&source);
             [$($token)*].iter().for_each(|expected: &(Token, Option<String>, Option<usize>, Option<String>)| {
                 let token = expected.0;

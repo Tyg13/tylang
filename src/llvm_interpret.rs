@@ -87,6 +87,7 @@ impl<'ctx> Interpreter<'ctx> {
     }
 
     fn expr_value(&self, expr: &Expression) -> IntValue<'ctx> {
+        use inkwell::IntPredicate::*;
         use ExpressionKind::*;
         match &expr.kind {
             BinaryOp { kind, lhs, rhs } => {
@@ -98,6 +99,10 @@ impl<'ctx> Interpreter<'ctx> {
                     Sub => self.builder.build_int_sub(lhs, rhs, "diff"),
                     Mul => self.builder.build_int_mul(lhs, rhs, "prod"),
                     Div => self.builder.build_int_signed_div(lhs, rhs, "quot"),
+                    Lt => self.builder.build_int_compare(SLT, lhs, rhs, "cmp"),
+                    Lte => self.builder.build_int_compare(SLE, lhs, rhs, "cmp"),
+                    Gt => self.builder.build_int_compare(SGT, lhs, rhs, "cmp"),
+                    Gte => self.builder.build_int_compare(SGE, lhs, rhs, "cmp"),
                 }
             }
             Constant(cons) => self.int().const_int(cons.value as u64, false),

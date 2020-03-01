@@ -163,7 +163,7 @@ mod tests {
             $( $entry! { $($args)* } )*;
             let mut out = Vec::new();
             let tree = $crate::parser::parse(&$crate::util::SourceBuilder::new()
-                .lines($source)
+                .source($source)
                 .build(),
                 map,
                 &mut out,
