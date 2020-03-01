@@ -103,7 +103,7 @@ impl Parser<'_> {
     fn parse_declaration(&mut self) -> Result<Statement> {
         let let_keyword = self.expect(TokenKind::Let)?;
         let var = self.parse_variable()?;
-        let initializer = if self.maybe(TokenKind::Assign).is_some() {
+        let initializer = if self.maybe(TokenKind::Equals).is_some() {
             Some(self.parse_expression()?)
         } else {
             None
@@ -117,7 +117,7 @@ impl Parser<'_> {
 
     fn parse_assignment(&mut self) -> Result<Statement> {
         let dst = self.parse_variable().map(Expression::from)?;
-        self.expect(TokenKind::Assign)?;
+        self.expect(TokenKind::Equals)?;
         let src = self.parse_expression()?;
         let semi = self.expect(TokenKind::SemiColon)?;
         Ok(Statement {
@@ -198,7 +198,7 @@ mod tests {
             "let x = 10;",
             token      { Let,       span!(1:01, 1:04) },
             identifier { "x",       span!(1:05, 1:06) },
-            token      { Assign,    span!(1:07, 1:08) },
+            token      { Equals,    span!(1:07, 1:08) },
             number     { 10,        span!(1:09, 1:11) },
             token      { SemiColon, span!(1:11, 1:12) },
         ];
@@ -224,7 +224,7 @@ mod tests {
             "let x = x;",
             token      { Let,       span!(1:01, 1:04) },
             identifier { "x",       span!(1:05, 1:06) },
-            token      { Assign,    span!(1:07, 1:08) },
+            token      { Equals,    span!(1:07, 1:08) },
             identifier { "x",       span!(1:08, 1:09) },
             token      { SemiColon, span!(1:10, 1:11) },
         ];
@@ -271,7 +271,7 @@ mod tests {
         let (tree, stdout) = tree![
             "x = x;",
             identifier { "x",       span!(1:01, 1:02) },
-            token      { Assign,    span!(1:03, 1:04) },
+            token      { Equals,    span!(1:03, 1:04) },
             identifier { "x",       span!(1:05, 1:06) },
             token      { SemiColon, span!(1:06, 1:07) },
         ];

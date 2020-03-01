@@ -3,9 +3,9 @@ use itertools::Itertools;
 use std::collections::HashMap;
 
 macro_rules! declare_tokens {
-    (keywords => { $($keyword:ident => $keyword_repr:literal),* }
-     single   => { $($single:ident => $single_repr:literal),* }
-     double   => { $($double:ident => $double_repr:literal),* }) => {
+    (keywords => { $($keyword:ident => $keyword_repr:literal,)* }
+     single   => { $($single:ident => $single_repr:literal,)* }
+     double   => { $($double:ident => $double_repr:literal,)* }) => {
         #[derive(Copy, Clone, Debug, PartialEq)]
         pub enum TokenKind {
             Identifier,
@@ -53,10 +53,10 @@ declare_tokens!(
         Else => "else",
         If => "if",
         Let => "let",
-        Return => "return"
+        Return => "return",
     }
     single => {
-        Assign => "=",
+        Equals => "=",
         Colon => ":",
         Comma => ",",
         Dot => ".",
@@ -68,9 +68,9 @@ declare_tokens!(
         Slash => "/",
         Star => "*",
         Tilde => "~",
-        BitAnd => "&",
-        BitOr => "|",
-        BitXor => "^",
+        Amp => "&",
+        Bar => "|",
+        Caret => "^",
 
         LeftBrace => "{",
         RightBrace => "}",
@@ -79,13 +79,15 @@ declare_tokens!(
         LeftBracket => "{",
         RightBracket => "}",
         LeftAngle => "<",
-        RightAngle => ">"
+        RightAngle => ">",
     }
     double => {
-        Equals => "==",
-        Scope => "::",
-        LogicAnd => "||",
-        LogicOr => "&&"
+        EqualsEquals => "==",
+        ColonColon => "::",
+        BarBar => "||",
+        AmpAmp => "&&",
+        LeftAngleEquals => "<=",
+        RightAngleEquals => ">=",
     }
 );
 
@@ -185,19 +187,23 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn scan_token(&mut self, first: char, indexed_chars: &mut TokenStream<'_>) -> Token {
-        macro_rules! special_cases {
-            {$($type:ident { $($case:literal => $tokens:expr,)* })+} => {
+    fn scan_token(&mut self, first: char, indexed_chars: &mut TokenStream<'_>) {
+        use TokenKind::*;
+        macro_rules! scan {
+            {$($type:ident { $($case:literal => $tokens:expr,)* }),+, { $rest:expr }} => {
                 match first {
-                    $($($case => return $type!($case, $tokens),)*)*
-                    _ => {}
+                    $($($case => {
+                        let (kind, len) = $type!($case, $tokens);
+                        self.map.add_token(kind, self.span(len))
+                    })*)*
+                    _ => $rest,
                 }
             }
         }
         macro_rules! single {
             ($char:literal, $token:expr) => {{
                 indexed_chars.next();
-                self.map.add_token($token, self.span(1))
+                ($token, 1)
             }};
         }
         macro_rules! double {
@@ -205,56 +211,58 @@ impl<'a> Lexer<'a> {
                 let single = $tokens.0;
                 let double = $tokens.1;
                 indexed_chars.next();
-                let (kind, len) = match indexed_chars.peek() {
+                match indexed_chars.peek() {
                     Some(&c) if c == $char => {
                         indexed_chars.next();
                         (double, 2)
                     }
                     _ => (single, 1),
-                };
-                self.map.add_token(kind, self.span(len))
+                }
             }};
         }
-        special_cases! {
+        let token = scan! {
             single {
-                '^' => TokenKind::BitXor,
-                '~' => TokenKind::Tilde,
-                '?' => TokenKind::Question,
-                '.' => TokenKind::Dot,
-                ',' => TokenKind::Comma,
-                '!' => TokenKind::Not,
-                ';' => TokenKind::SemiColon,
-                '*' => TokenKind::Star,
-                '+' => TokenKind::Plus,
-                '-' => TokenKind::Minus,
-                '/' => TokenKind::Slash,
-                '(' => TokenKind::LeftParen,
-                ')' => TokenKind::RightParen,
-                '{' => TokenKind::LeftBrace,
-                '}' => TokenKind::RightBrace,
-                '[' => TokenKind::LeftBracket,
-                ']' => TokenKind::RightBracket,
-                '<' => TokenKind::LeftAngle,
-                '>' => TokenKind::RightAngle,
-            }
+                '^' => Caret,
+                '~' => Tilde,
+                '?' => Question,
+                '.' => Dot,
+                ',' => Comma,
+                '!' => Not,
+                ';' => SemiColon,
+                '*' => Star,
+                '+' => Plus,
+                '-' => Minus,
+                '/' => Slash,
+                '(' => LeftParen,
+                ')' => RightParen,
+                '{' => LeftBrace,
+                '}' => RightBrace,
+                '[' => LeftBracket,
+                ']' => RightBracket,
+                '<' => LeftAngle,
+                '>' => RightAngle,
+            },
             double {
-                '=' => (TokenKind::Assign, TokenKind::Equals),
-                ':' => (TokenKind::Colon, TokenKind::Scope),
-                '|' => (TokenKind::BitOr, TokenKind::LogicOr),
-                '&' => (TokenKind::BitAnd, TokenKind::LogicAnd),
+                '=' => (Equals, EqualsEquals),
+                ':' => (Colon, ColonColon),
+                '|' => (Bar, BarBar),
+                '&' => (Amp, AmpAmp),
+            },
+            {
+                if first == '"' {
+                    self.scan_string(indexed_chars)
+                } else if first.is_numeric() {
+                    self.scan_number(indexed_chars)
+                } else if is_ident(first) {
+                    self.scan_identifier_or_keyword(indexed_chars)
+                } else {
+                    dbg!(first, self.line, self.column);
+                    indexed_chars.next();
+                    self.map.add_token(TokenKind::Invalid, self.span(1))
+                }
             }
         };
-        if first == '"' {
-            self.scan_string(indexed_chars)
-        } else if first.is_numeric() {
-            self.scan_number(indexed_chars)
-        } else if is_ident(first) {
-            self.scan_identifier_or_keyword(indexed_chars)
-        } else {
-            dbg!(first, self.line, self.column);
-            indexed_chars.next();
-            self.map.add_token(TokenKind::Invalid, self.span(1))
-        }
+        self.column = token.span.end.column;
     }
 
     fn scan_string(&mut self, indexed_chars: &mut TokenStream<'_>) -> Token {
@@ -297,8 +305,7 @@ impl<'a> Lexer<'a> {
                     chars.next();
                     continue;
                 }
-                let token = self.scan_token(c, &mut chars);
-                self.column = token.span.end.column;
+                self.scan_token(c, &mut chars);
             }
         }
         self.map
@@ -332,7 +339,7 @@ mod tests {
                     token
                 }};
             }
-            macro_rules! identifier {
+            macro_rules! ident {
                 { $ident:expr, $span:expr } => {
                     (_token!(Identifier, $span), Some(String::from($ident)), None, None)
                 }
@@ -376,7 +383,7 @@ mod tests {
     #[test]
     fn single() {
         assert_tokens! { "identifier", [
-            identifier! { "identifier", span!(1:1, 1:11) }
+            ident! { "identifier", span!(1:1, 1:11) }
         ]};
         assert_tokens! { "1200", [
             number! { 1200, span!(1:1, 1:5) }
@@ -386,87 +393,87 @@ mod tests {
     #[test]
     fn mixed() {
         assert_tokens! { "mixed 1200", [
-            identifier! { "mixed",       span!(1:01, 1:06) },
-            number!     { 1200,          span!(1:07, 1:11) },
+            ident!  { "mixed", span!(1:01, 1:06) },
+            number! { 1200,    span!(1:07, 1:11) },
         ]};
         assert_tokens! { "1200mixed", [
-            number!     { 1200,         span!(1:01, 1:05) },
-            identifier! { "mixed",      span!(1:05, 1:10) },
+            number! { 1200,    span!(1:01, 1:05) },
+            ident!  { "mixed", span!(1:05, 1:10) },
         ]};
         assert_tokens! { "1200 +  mixed;", [
-            number!     { 1200,          span!(1:01, 1:05) },
-            token!      { Plus,          span!(1:06, 1:07) },
-            identifier! { "mixed",       span!(1:09, 1:14) },
-            token!      { SemiColon,     span!(1:14, 1:15) }
+            number! { 1200,      span!(1:01, 1:05) },
+            token!  { Plus,      span!(1:06, 1:07) },
+            ident!  { "mixed",   span!(1:09, 1:14) },
+            token!  { SemiColon, span!(1:14, 1:15) }
         ]};
     }
     #[test]
     fn multi_line() {
         assert_tokens! { "some idents\n10 + 20", [
-            identifier! { "some",   span!(1:01, 1:05) },
-            identifier! { "idents", span!(1:06, 1:12) },
-            number!     { 10,       span!(2:01, 2:03) },
-            token!      { Plus,     span!(2:04, 2:05) },
-            number!     { 20,       span!(2:06, 2:08) },
+            ident!  { "some",   span!(1:01, 1:05) },
+            ident!  { "idents", span!(1:06, 1:12) },
+            number! { 10,       span!(2:01, 2:03) },
+            token!  { Plus,     span!(2:04, 2:05) },
+            number! { 20,       span!(2:06, 2:08) },
         ]};
     }
     #[test]
     fn all() {
         assert_tokens! { "ident 1234567890 ===!(){}[]<>:::+*-,./?~&&&|||^", [
-            identifier! { "ident",      span!(1:01, 1:06) },
-            number!     { 1234567890,   span!(1:07, 1:17) },
-            token!      { Equals,       span!(1:18, 1:20) },
-            token!      { Assign,       span!(1:20, 1:21) },
-            token!      { Not,          span!(1:21, 1:22) },
-            token!      { LeftParen,    span!(1:22, 1:23) },
-            token!      { RightParen,   span!(1:23, 1:24) },
-            token!      { LeftBrace,    span!(1:24, 1:25) },
-            token!      { RightBrace,   span!(1:25, 1:26) },
-            token!      { LeftBracket,  span!(1:26, 1:27) },
-            token!      { RightBracket, span!(1:27, 1:28) },
-            token!      { LeftAngle,    span!(1:28, 1:29) },
-            token!      { RightAngle,   span!(1:29, 1:30) },
-            token!      { Scope,        span!(1:30, 1:32) },
-            token!      { Colon,        span!(1:32, 1:33) },
-            token!      { Plus,         span!(1:33, 1:34) },
-            token!      { Star,         span!(1:34, 1:35) },
-            token!      { Minus,        span!(1:35, 1:36) },
-            token!      { Comma,        span!(1:36, 1:37) },
-            token!      { Dot,          span!(1:37, 1:38) },
-            token!      { Slash,        span!(1:38, 1:39) },
-            token!      { Question,     span!(1:39, 1:40) },
-            token!      { Tilde,        span!(1:40, 1:41) },
-            token!      { LogicAnd,     span!(1:41, 1:43) },
-            token!      { BitAnd,       span!(1:43, 1:44) },
-            token!      { LogicOr,      span!(1:44, 1:46) },
-            token!      { BitOr,        span!(1:46, 1:47) },
-            token!      { BitXor,       span!(1:47, 1:48) },
+            ident!  { "ident",      span!(1:01, 1:06) },
+            number! { 1234567890,   span!(1:07, 1:17) },
+            token!  { EqualsEquals, span!(1:18, 1:20) },
+            token!  { Equals,       span!(1:20, 1:21) },
+            token!  { Not,          span!(1:21, 1:22) },
+            token!  { LeftParen,    span!(1:22, 1:23) },
+            token!  { RightParen,   span!(1:23, 1:24) },
+            token!  { LeftBrace,    span!(1:24, 1:25) },
+            token!  { RightBrace,   span!(1:25, 1:26) },
+            token!  { LeftBracket,  span!(1:26, 1:27) },
+            token!  { RightBracket, span!(1:27, 1:28) },
+            token!  { LeftAngle,    span!(1:28, 1:29) },
+            token!  { RightAngle,   span!(1:29, 1:30) },
+            token!  { ColonColon,   span!(1:30, 1:32) },
+            token!  { Colon,        span!(1:32, 1:33) },
+            token!  { Plus,         span!(1:33, 1:34) },
+            token!  { Star,         span!(1:34, 1:35) },
+            token!  { Minus,        span!(1:35, 1:36) },
+            token!  { Comma,        span!(1:36, 1:37) },
+            token!  { Dot,          span!(1:37, 1:38) },
+            token!  { Slash,        span!(1:38, 1:39) },
+            token!  { Question,     span!(1:39, 1:40) },
+            token!  { Tilde,        span!(1:40, 1:41) },
+            token!  { AmpAmp,       span!(1:41, 1:43) },
+            token!  { Amp,          span!(1:43, 1:44) },
+            token!  { BarBar,       span!(1:44, 1:46) },
+            token!  { Bar,          span!(1:46, 1:47) },
+            token!  { Caret,        span!(1:47, 1:48) },
         ]};
     }
     #[test]
     fn keyword() {
         assert_tokens! { "let x = 10;", [
-            token!      { Let,       span!(1:01, 1:04) },
-            identifier! { "x",       span!(1:05, 1:06) },
-            token!      { Assign,    span!(1:07, 1:08) },
-            number!     { 10,        span!(1:09, 1:11) },
-            token!      { SemiColon, span!(1:11, 1:12) },
+            token!  { Let,       span!(1:01, 1:04) },
+            ident!  { "x",       span!(1:05, 1:06) },
+            token!  { Equals,    span!(1:07, 1:08) },
+            number! { 10,        span!(1:09, 1:11) },
+            token!  { SemiColon, span!(1:11, 1:12) },
         ]};
         assert_tokens! { "return 10;", [
-            token!  { Return,     span!(1:01, 1:07) },
+            token!  { Return,    span!(1:01, 1:07) },
             number! { 10,        span!(1:08, 1:10) },
             token!  { SemiColon, span!(1:10, 1:11) },
         ]};
         assert_tokens! { "if n > 10 { return n; }", [
-            token!      { If,         span!(1:01, 1:03) },
-            identifier! { "n",        span!(1:04, 1:05) },
-            token!      { RightAngle, span!(1:06, 1:07) },
-            number!     { 10,         span!(1:08, 1:10) },
-            token!      { LeftBrace,  span!(1:11, 1:12) },
-            token!      { Return,      span!(1:13, 1:19) },
-            identifier! { "n",        span!(1:20, 1:21) },
-            token!      { SemiColon,  span!(1:21, 1:22) },
-            token!      { RightBrace, span!(1:23, 1:24) },
+            token!  { If,         span!(1:01, 1:03) },
+            ident!  { "n",        span!(1:04, 1:05) },
+            token!  { RightAngle, span!(1:06, 1:07) },
+            number! { 10,         span!(1:08, 1:10) },
+            token!  { LeftBrace,  span!(1:11, 1:12) },
+            token!  { Return,     span!(1:13, 1:19) },
+            ident!  { "n",        span!(1:20, 1:21) },
+            token!  { SemiColon,  span!(1:21, 1:22) },
+            token!  { RightBrace, span!(1:23, 1:24) },
         ]};
     }
     #[test]

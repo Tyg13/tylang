@@ -53,7 +53,7 @@ mod test {
         let (_, stdout) = tree![
             "let=;",
             token      { Let,       span!(1:01, 1:04) },
-            token      { Assign,    span!(1:04, 1:05) },
+            token      { Equals,    span!(1:04, 1:05) },
             token      { SemiColon, span!(1:05, 1:06) },
         ];
         assert_lines!(
@@ -68,7 +68,7 @@ ParseError: expected `identifier`
             "let n =;",
             token      { Let,       span!(1:01, 1:04) },
             identifier { "n",       span!(1:05, 1:06) },
-            token      { Assign,    span!(1:07, 1:08) },
+            token      { Equals,    span!(1:07, 1:08) },
             token      { SemiColon, span!(1:08, 1:09) },
         ];
         assert_lines!(
@@ -86,11 +86,11 @@ ParseError: expected `expression`
         let (_, stdout) = tree![
             "let=;\nlet n =;",
             token      { Let,       span!(1:01, 1:04) },
-            token      { Assign,    span!(1:04, 1:05) },
+            token      { Equals,    span!(1:04, 1:05) },
             token      { SemiColon, span!(1:05, 1:06) },
             token      { Let,       span!(2:01, 2:04) },
             identifier { "n",       span!(2:05, 2:06) },
-            token      { Assign,    span!(2:07, 2:08) },
+            token      { Equals,    span!(2:07, 2:08) },
             token      { SemiColon, span!(2:08, 2:09) },
         ];
         assert_lines!(

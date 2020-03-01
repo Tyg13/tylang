@@ -1,4 +1,5 @@
 use super::*;
+use std::convert::TryFrom;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum BinaryOpKind {
@@ -59,27 +60,36 @@ struct BinaryOp {
     precedence: usize,
 }
 
-impl BinaryOp {
-    fn from(kind: TokenKind) -> Option<BinaryOp> {
+impl TryFrom<TokenKind> for BinaryOp {
+    type Error = ();
+    fn try_from(kind: TokenKind) -> std::result::Result<Self, Self::Error> {
         use BinaryOpKind::*;
-        Some(match kind {
+        Ok(match kind {
+            TokenKind::LeftAngle => BinaryOp {
+                kind: Lt,
+                precedence: 1,
+            },
+            TokenKind::RightAngle => BinaryOp {
+                kind: Gt,
+                precedence: 1,
+            },
             TokenKind::Plus => BinaryOp {
                 kind: Add,
-                precedence: 1,
+                precedence: 2,
             },
             TokenKind::Minus => BinaryOp {
                 kind: Sub,
-                precedence: 1,
+                precedence: 2,
             },
             TokenKind::Star => BinaryOp {
                 kind: Mul,
-                precedence: 2,
+                precedence: 3,
             },
             TokenKind::Slash => BinaryOp {
                 kind: Div,
-                precedence: 2,
+                precedence: 3,
             },
-            _ => return None,
+            _ => return Err(()),
         })
     }
 }
@@ -126,7 +136,7 @@ impl Parser<'_> {
         context: &mut Context,
     ) -> Result<Expression> {
         if let Ok(token) = self.peek() {
-            if let Some(op) = BinaryOp::from(token.kind) {
+            if let Ok(op) = BinaryOp::try_from(token.kind) {
                 let precedence = context.precedence;
                 let parse_op = match kind {
                     Precedence::Higher => op.precedence >= context.precedence,
@@ -171,7 +181,7 @@ mod tests {
         let (tree, stdout) = tree![
             "x = 1 + 1;",
             identifier { "x",       span!(1:01, 1:02) },
-            token      { Assign,    span!(1:03, 1:04) },
+            token      { Equals,    span!(1:03, 1:04) },
             number     { 1,         span!(1:05, 1:06) },
             token      { Plus,      span!(1:07, 1:08) },
             number     { 1,         span!(1:09, 1:10) },
@@ -210,7 +220,7 @@ mod tests {
         let (tree, stdout) = tree![
             "x = 2 + 2*2;",
             identifier { "x",       span!(1:01, 1:02) },
-            token      { Assign,    span!(1:03, 1:04) },
+            token      { Equals,    span!(1:03, 1:04) },
             number     { 2,         span!(1:05, 1:06) },
             token      { Plus,      span!(1:07, 1:08) },
             number     { 2,         span!(1:09, 1:10) },
@@ -246,7 +256,7 @@ mod tests {
         let (tree, stdout) = tree![
             "x = 2 * 2+2;",
             identifier { "x",       span!(1:01, 1:02) },
-            token      { Assign,    span!(1:03, 1:04) },
+            token      { Equals,    span!(1:03, 1:04) },
             number     { 2,         span!(1:05, 1:06) },
             token      { Star,      span!(1:07, 1:08) },
             number     { 2,         span!(1:09, 1:10) },
@@ -282,7 +292,7 @@ mod tests {
         let (tree, stdout) = tree![
             "x = (2 + 2)*2;",
             identifier { "x",        span!(1:01, 1:02) },
-            token      { Assign,     span!(1:03, 1:04) },
+            token      { Equals,     span!(1:03, 1:04) },
             token      { LeftParen,  span!(1:05, 1:06) },
             number     { 2,          span!(1:06, 1:07) },
             token      { Plus,       span!(1:08, 1:09) },
