@@ -89,19 +89,24 @@ enum Precedence {
     Lower,
 }
 
+struct Context {
+    precedence: usize,
+}
+
 impl Parser<'_> {
     pub(super) fn parse_expression(&mut self) -> Result<Expression> {
+        self.parse_expression_in_context(&mut Context { precedence: 0 })
+    }
+
+    fn parse_expression_in_context(&mut self, context: &mut Context) -> Result<Expression> {
         let token = self.peek()?;
         let expr = match token.kind {
             TokenKind::LeftParen => {
-                let precedence = self.precedence;
-                self.precedence = 0;
                 let left_paren = self.expect(TokenKind::LeftParen)?;
                 let expr = self.parse_expression()?;
                 let right_paren = self.expect(TokenKind::RightParen)?;
-                self.precedence = precedence;
                 Expression {
-                    span: span!(left_paren.span.start, right_paren.span.end),
+                    span: span!(left_paren, right_paren),
                     kind: ExpressionKind::Group(Rc::new(expr)),
                 }
             }
@@ -111,39 +116,46 @@ impl Parser<'_> {
                 return Err(Error::UnexpectedToken(String::from("expression")));
             }
         };
-        Ok(self.maybe_parse_binary_op_of_precedence(expr, Precedence::Higher)?)
+        Ok(self.maybe_parse_binary_op_of_precedence(expr, Precedence::Higher, context)?)
     }
 
     fn maybe_parse_binary_op_of_precedence(
         &mut self,
         expr: Expression,
         kind: Precedence,
+        context: &mut Context,
     ) -> Result<Expression> {
-        let token = self.peek()?;
-        if let Some(op) = BinaryOp::from(token.kind) {
-            let precedence = self.precedence;
-            let parse_op = match kind {
-                Precedence::Higher => op.precedence >= self.precedence,
-                Precedence::Lower => op.precedence < self.precedence,
-            };
-            if parse_op {
-                self.precedence = op.precedence;
-                return Ok(self.parse_binary_op(expr, op.kind)?);
+        if let Ok(token) = self.peek() {
+            if let Some(op) = BinaryOp::from(token.kind) {
+                let precedence = context.precedence;
+                let parse_op = match kind {
+                    Precedence::Higher => op.precedence >= context.precedence,
+                    Precedence::Lower => op.precedence < context.precedence,
+                };
+                if parse_op {
+                    context.precedence = op.precedence;
+                    return Ok(self.parse_binary_op(expr, op.kind, context)?);
+                }
+                context.precedence = precedence;
             }
-            self.precedence = precedence;
         }
         Ok(expr)
     }
 
-    fn parse_binary_op(&mut self, lhs: Expression, kind: BinaryOpKind) -> Result<Expression> {
+    fn parse_binary_op(
+        &mut self,
+        lhs: Expression,
+        kind: BinaryOpKind,
+        context: &mut Context,
+    ) -> Result<Expression> {
         let _ = self.advance()?;
         let lhs = Rc::new(lhs);
-        let rhs = Rc::new(self.parse_expression()?);
+        let rhs = Rc::new(self.parse_expression_in_context(context)?);
         let mut expr = Expression {
-            span: span!(lhs.span.start, rhs.span.end),
+            span: span!(lhs, rhs),
             kind: ExpressionKind::BinaryOp { kind, lhs, rhs },
         };
-        expr = self.maybe_parse_binary_op_of_precedence(expr, Precedence::Lower)?;
+        expr = self.maybe_parse_binary_op_of_precedence(expr, Precedence::Lower, context)?;
         Ok(expr)
     }
 }
@@ -152,6 +164,7 @@ impl Parser<'_> {
 mod tests {
     use super::*;
     use crate::{assert_empty, binary_op, expr, expr_con, expr_var, span, stmt, tree};
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn binary_op() {

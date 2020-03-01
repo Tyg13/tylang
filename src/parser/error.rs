@@ -40,6 +40,14 @@ mod test {
     use super::*;
     use crate::tree;
 
+    macro_rules! assert_lines {
+        ($expected:literal, $actual:expr) => {
+            for (actual, expected) in $actual.lines().zip($expected.lines()) {
+                assert_eq!(actual, expected);
+            }
+        };
+    }
+
     #[test]
     fn expected() {
         let (_, stdout) = tree![
@@ -48,11 +56,26 @@ mod test {
             token      { Assign,    span!(1:04, 1:05) },
             token      { SemiColon, span!(1:05, 1:06) },
         ];
-        assert_eq!(
+        assert_lines!(
             r#"
 ParseError: expected `identifier`
 [<err>:1:4]    let=;
 ------------------^
+"#,
+            &stdout
+        );
+        let (_, stdout) = tree![
+            "let n =;",
+            token      { Let,       span!(1:01, 1:04) },
+            identifier { "n",       span!(1:05, 1:06) },
+            token      { Assign,    span!(1:07, 1:08) },
+            token      { SemiColon, span!(1:08, 1:09) },
+        ];
+        assert_lines!(
+            r#"
+ParseError: expected `expression`
+[<err>:1:8]    let n =;
+----------------------^
 "#,
             &stdout
         );
@@ -61,23 +84,24 @@ ParseError: expected `identifier`
     #[test]
     fn multiple() {
         let (_, stdout) = tree![
-            "let=;\nlet=;",
+            "let=;\nlet n =;",
             token      { Let,       span!(1:01, 1:04) },
             token      { Assign,    span!(1:04, 1:05) },
             token      { SemiColon, span!(1:05, 1:06) },
             token      { Let,       span!(2:01, 2:04) },
-            token      { Assign,    span!(2:04, 2:05) },
-            token      { SemiColon, span!(2:05, 2:06) },
+            identifier { "n",       span!(2:05, 2:06) },
+            token      { Assign,    span!(2:07, 2:08) },
+            token      { SemiColon, span!(2:08, 2:09) },
         ];
-        assert_eq!(
+        assert_lines!(
             r#"
 ParseError: expected `identifier`
 [<err>:1:4]    let=;
 ------------------^
 
-ParseError: expected `identifier`
-[<err>:2:4]    let=;
-------------------^
+ParseError: expected `expression`
+[<err>:2:8]    let n =;
+----------------------^
 "#,
             &stdout
         );

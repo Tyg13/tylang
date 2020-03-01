@@ -2,94 +2,92 @@ use crate::util::{Anchor, Source, Span};
 use itertools::Itertools;
 use std::collections::HashMap;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum TokenKind {
-    Identifier,
-    Number,
-    String,
+macro_rules! declare_tokens {
+    (keywords => { $($keyword:ident => $keyword_repr:literal),* }
+     single   => { $($single:ident => $single_repr:literal),* }
+     double   => { $($double:ident => $double_repr:literal),* }) => {
+        #[derive(Copy, Clone, Debug, PartialEq)]
+        pub enum TokenKind {
+            Identifier,
+            Number,
+            String,
 
-    Assign,
-    Colon,
-    Comma,
-    Dot,
-    Minus,
-    Not,
-    Plus,
-    Question,
-    SemiColon,
-    Slash,
-    Star,
-    Tilde,
-    BitAnd,
-    BitOr,
-    BitXor,
+            $($single,)*
+            $($double,)*
+            $($keyword,)*
 
-    Equals,
-    Scope,
-    LogicAnd,
-    LogicOr,
+            Invalid,
+        }
+        impl std::fmt::Display for TokenKind {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", Into::<&'static str>::into(*self))
+            }
+        }
+        impl From<TokenKind> for &'static str {
+            fn from(token: TokenKind) -> Self {
+                use TokenKind::*;
+                match token {
+                    Identifier => "identifier",
+                    Number => "number",
+                    String => "string literal",
 
-    LeftBrace,
-    RightBrace,
-    LeftParen,
-    RightParen,
-    LeftBracket,
-    RightBracket,
-    LeftAngle,
-    RightAngle,
+                    $($keyword => $keyword_repr,)*
+                    $($single => $single_repr,)*
+                    $($double => $double_repr,)*
 
-    Let,
-    Print,
-
-    Invalid,
-}
-
-impl std::fmt::Display for TokenKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use TokenKind::*;
-        let repr = match *self {
-            Identifier => "identifier",
-            Number => "number",
-            String => "string literal",
-
-            Assign => "=",
-            Colon => ":",
-            Comma => ",",
-            Dot => ".",
-            Minus => "-",
-            Not => "!",
-            Plus => "+",
-            Question => "?",
-            SemiColon => ";",
-            Slash => "/",
-            Star => "*",
-            Tilde => "~",
-            BitAnd => "&",
-            BitOr => "|",
-            BitXor => "^",
-
-            Equals => "==",
-            Scope => "::",
-            LogicAnd => "||",
-            LogicOr => "&&",
-
-            LeftBrace => "{",
-            RightBrace => "}",
-            LeftParen => "(",
-            RightParen => ")",
-            LeftBracket => "{",
-            RightBracket => "}",
-            LeftAngle => "<",
-            RightAngle => ">",
-
-            Let => "let",
-            Print => "print",
-
-            Invalid => "##INVALID##",
-        };
-        write!(f, "{}", repr)
+                    Invalid => "##INVALID##",
+                }
+            }
+        }
+        fn keyword<T: AsRef<str>>(identifier: T) -> Option<TokenKind> {
+            match identifier.as_ref() {
+                $($keyword_repr => Some(TokenKind::$keyword),)*
+                _ => None,
+            }
+        }
     }
 }
+
+declare_tokens!(
+    keywords => {
+        Else => "else",
+        If => "if",
+        Let => "let",
+        Return => "return"
+    }
+    single => {
+        Assign => "=",
+        Colon => ":",
+        Comma => ",",
+        Dot => ".",
+        Minus => "-",
+        Not => "!",
+        Plus => "+",
+        Question => "?",
+        SemiColon => ";",
+        Slash => "/",
+        Star => "*",
+        Tilde => "~",
+        BitAnd => "&",
+        BitOr => "|",
+        BitXor => "^",
+
+        LeftBrace => "{",
+        RightBrace => "}",
+        LeftParen => "(",
+        RightParen => ")",
+        LeftBracket => "{",
+        RightBracket => "}",
+        LeftAngle => "<",
+        RightAngle => ">"
+    }
+    double => {
+        Equals => "==",
+        Scope => "::",
+        LogicAnd => "||",
+        LogicOr => "&&"
+    }
+);
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub struct TokenId(usize);
@@ -281,11 +279,7 @@ impl<'a> Lexer<'a> {
         let identifier: String = indexed_chars.peeking_take_while(|&c| is_ident(c)).collect();
         let len = identifier.len();
         let span = self.span(len);
-        let kind = match identifier.as_str() {
-            "let" => TokenKind::Let,
-            "print" => TokenKind::Print,
-            _ => TokenKind::Identifier,
-        };
+        let kind = keyword(&identifier).unwrap_or(TokenKind::Identifier);
         match kind {
             TokenKind::Identifier => self.map.add_ident(identifier, span),
             kind => self.map.add_token(kind, span),
@@ -458,10 +452,21 @@ mod tests {
             number!     { 10,        span!(1:09, 1:11) },
             token!      { SemiColon, span!(1:11, 1:12) },
         ]};
-        assert_tokens! { "print 10;", [
-            token!  { Print,     span!(1:01, 1:06) },
-            number! { 10,        span!(1:07, 1:09) },
-            token!  { SemiColon, span!(1:09, 1:10) },
+        assert_tokens! { "return 10;", [
+            token!  { Return,     span!(1:01, 1:07) },
+            number! { 10,        span!(1:08, 1:10) },
+            token!  { SemiColon, span!(1:10, 1:11) },
+        ]};
+        assert_tokens! { "if n > 10 { return n; }", [
+            token!      { If,         span!(1:01, 1:03) },
+            identifier! { "n",        span!(1:04, 1:05) },
+            token!      { RightAngle, span!(1:06, 1:07) },
+            number!     { 10,         span!(1:08, 1:10) },
+            token!      { LeftBrace,  span!(1:11, 1:12) },
+            token!      { Return,      span!(1:13, 1:19) },
+            identifier! { "n",        span!(1:20, 1:21) },
+            token!      { SemiColon,  span!(1:21, 1:22) },
+            token!      { RightBrace, span!(1:23, 1:24) },
         ]};
     }
     #[test]

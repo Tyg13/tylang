@@ -10,7 +10,14 @@ pub enum StatementKind {
         dst: Expression,
         src: Expression,
     },
-    Print(Expression),
+    Return(Expression),
+    Scope(Scope),
+    Expression(Expression),
+    If {
+        condition: Rc<Expression>,
+        block: Rc<Statement>,
+    },
+    Null,
 }
 
 impl std::fmt::Display for StatementKind {
@@ -22,7 +29,11 @@ impl std::fmt::Display for StatementKind {
                 None => write!(f, "{}", var),
             },
             Assignment { dst, src } => write!(f, "{} = {}", dst, src),
-            Print(expr) => write!(f, "Print({})", expr),
+            Return(expr) => write!(f, "Return({})", expr),
+            Scope(scope) => write!(f, "Scope({})", scope),
+            Expression(expr) => write!(f, "StmtExpr({})", expr),
+            Null => write!(f, "Null"),
+            If { condition, block } => write!(f, "If({}, {})", condition, block),
         }
     }
 }
@@ -37,7 +48,7 @@ impl std::fmt::Display for Statement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Statement({span}) {kind}",
+            "Statement({span} {kind})",
             span = self.span,
             kind = self.kind
         )
@@ -45,11 +56,12 @@ impl std::fmt::Display for Statement {
 }
 
 impl Parser<'_> {
-    pub(super) fn parse_statements(&mut self) {
+    pub(super) fn parse_scope(&mut self) -> Scope {
         let mut any_errors = false;
+        let mut statements = Vec::new();
         loop {
             match self.parse_statement() {
-                Ok(Some(statement)) => self.tree.statements.push(statement),
+                Ok(Some(statement)) => statements.push(statement),
                 Ok(None) => break,
                 Err(err) => {
                     any_errors = true;
@@ -63,8 +75,9 @@ impl Parser<'_> {
         }
         // Hack to prevent interpreter running for now
         if any_errors {
-            self.tree.statements.clear();
+            statements.clear();
         }
+        Scope { statements }
     }
 
     fn parse_statement(&mut self) -> Result<Option<Statement>> {
@@ -75,11 +88,14 @@ impl Parser<'_> {
         };
         match token.kind {
             TokenKind::Let => self.parse_declaration(),
-            TokenKind::Print => self.parse_print(),
+            TokenKind::Return => self.parse_print(),
             TokenKind::Identifier => self.parse_assignment(),
-            _ => {
-                return Err(Error::UnexpectedToken(String::from("statement")));
-            }
+            TokenKind::LeftBrace => self.parse_local_scope(),
+            TokenKind::SemiColon => self.parse_null(),
+            TokenKind::If => self.parse_if_statement(),
+            _ => self
+                .parse_expr_statement()
+                .map_err(|_| Error::UnexpectedToken(String::from("statement"))),
         }
         .map(Some)
     }
@@ -94,7 +110,7 @@ impl Parser<'_> {
         };
         let semi = self.expect(TokenKind::SemiColon)?;
         Ok(Statement {
-            span: span!(let_keyword.span.start, semi.span.end),
+            span: span!(let_keyword, semi),
             kind: StatementKind::Declaration { var, initializer },
         })
     }
@@ -105,18 +121,68 @@ impl Parser<'_> {
         let src = self.parse_expression()?;
         let semi = self.expect(TokenKind::SemiColon)?;
         Ok(Statement {
-            span: span!(dst.span.start, semi.span.end),
+            span: span!(dst, semi),
             kind: StatementKind::Assignment { src, dst },
         })
     }
 
     fn parse_print(&mut self) -> Result<Statement> {
-        let print = self.expect(TokenKind::Print)?;
+        let print = self.expect(TokenKind::Return)?;
         let expr = self.parse_expression()?;
         let semi = self.expect(TokenKind::SemiColon)?;
         Ok(Statement {
-            span: span!(print.span.start, semi.span.end),
-            kind: StatementKind::Print(expr),
+            span: span!(print, semi),
+            kind: StatementKind::Return(expr),
+        })
+    }
+
+    pub(super) fn parse_local_scope(&mut self) -> Result<Statement> {
+        let left_brace = self.expect(TokenKind::LeftBrace)?;
+        let right_brace;
+        let new_scope = {
+            let mut new_scope = Scope::new();
+            loop {
+                if let Some(brace) = self.maybe(TokenKind::RightBrace) {
+                    right_brace = brace;
+                    break new_scope;
+                }
+                match self.parse_statement() {
+                    Ok(Some(statement)) => new_scope.statements.push(statement),
+                    Ok(None) => return Err(Error::EOF),
+                    Err(e) => return Err(e),
+                };
+            }
+        };
+        Ok(Statement {
+            span: span!(left_brace, right_brace),
+            kind: StatementKind::Scope(new_scope),
+        })
+    }
+
+    fn parse_expr_statement(&mut self) -> Result<Statement> {
+        let expr = self.parse_expression()?;
+        let semi = self.expect(TokenKind::SemiColon)?;
+        Ok(Statement {
+            span: span!(expr, semi),
+            kind: StatementKind::Expression(expr),
+        })
+    }
+
+    fn parse_if_statement(&mut self) -> Result<Statement> {
+        let _if = self.expect(TokenKind::If)?;
+        let condition = Rc::new(self.parse_expression()?);
+        let block = Rc::new(self.parse_local_scope()?);
+        Ok(Statement {
+            span: span!(_if, block),
+            kind: StatementKind::If { condition, block },
+        })
+    }
+
+    fn parse_null(&mut self) -> Result<Statement> {
+        let token = self.expect(TokenKind::SemiColon)?;
+        Ok(Statement {
+            span: token.span,
+            kind: StatementKind::Null,
         })
     }
 }

@@ -6,26 +6,40 @@ use std::rc::Rc;
 mod constant;
 mod error;
 mod expression;
+mod function;
 mod statement;
 mod variable;
+pub mod visit;
 pub use constant::*;
 use error::*;
 pub use expression::*;
 pub use statement::*;
 pub use variable::*;
+pub use visit::Visitor;
 
-#[derive(Debug, PartialEq)]
-pub struct Tree {
+#[derive(Clone, Debug, PartialEq)]
+pub struct Scope {
     pub statements: Vec<Statement>,
 }
 
-impl Tree {
+impl std::fmt::Display for Scope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner: Vec<String> = self
+            .statements
+            .iter()
+            .map(|statement| statement.kind.to_string())
+            .collect();
+        write!(f, "[{}]", inner.join(","))
+    }
+}
+
+impl Scope {
     fn new() -> Self {
         Self { statements: vec![] }
     }
 }
 
-pub fn parse(source: &Source, map: TokenMap, out: &mut dyn std::io::Write) -> Tree {
+pub fn parse(source: &Source, map: TokenMap, out: &mut dyn std::io::Write) -> Scope {
     Parser::new(source, map, out).parse()
 }
 
@@ -37,8 +51,6 @@ pub struct Parser<'a> {
     map: TokenMap,
     index: usize,
     backtrack_index: usize,
-    precedence: usize,
-    tree: Tree,
 }
 
 impl<'a> Parser<'a> {
@@ -49,27 +61,24 @@ impl<'a> Parser<'a> {
             map,
             index: 0,
             backtrack_index: 0,
-            precedence: 0,
-            tree: Tree::new(),
         }
     }
 
-    fn parse(self) -> Tree {
+    fn parse(self) -> Scope {
         let mut this = self;
-        this.parse_statements();
-        this.tree
+        this.parse_scope()
     }
 
-    fn peek(&self) -> Result<Token> {
+    fn peek(&mut self) -> Result<Token> {
         if self.index >= self.map.len() {
             return Err(Error::EOF);
         }
+        self.sync();
         Ok(self.map.token(self.index))
     }
 
     fn advance(&mut self) -> Result<Token> {
         let token = self.peek()?;
-        self.sync();
         self.index = self
             .index
             .checked_add(1)

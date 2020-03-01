@@ -27,21 +27,21 @@ impl fmt::Display for Span {
 #[macro_export]
 macro_rules! span {
     ($start_line:literal : $start_column:literal, $end_line:literal:$end_column:literal) => {
-        span! {
-            $crate::util::Anchor {
+        $crate::util::Span {
+            start: $crate::util::Anchor {
                 line: $start_line,
                 column: $start_column,
             },
-            $crate::util::Anchor {
+            end: $crate::util::Anchor {
                 line: $end_line,
                 column: $end_column,
-            }
+            },
         }
     };
     ($start:expr, $end:expr) => {
         $crate::util::Span {
-            start: $start,
-            end: $end,
+            start: $start.span.start,
+            end: $end.span.end,
         }
     };
 }

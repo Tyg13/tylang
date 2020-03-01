@@ -1,8 +1,8 @@
 use clap::{clap_app, AppSettings};
 use std::fs;
 
-mod interpret;
 mod lexer;
+mod llvm_interpret;
 mod parser;
 mod util;
 
@@ -11,13 +11,15 @@ use util::SourceBuilder;
 #[derive(Debug)]
 enum Error {
     ReadingInput(std::io::Error),
+    UnknownAction(String),
 }
 
 fn main() -> Result<(), Error> {
     let matches = clap_app!(tylang =>
         (version: "0.0")
         (author: "Tyler Lanphear")
-        (@arg INPUT: +required "Source file to compile")
+        (@arg INPUT: +required "Input source file")
+        (@arg ACTION: -a --action +takes_value "Action to take on input file")
     )
     .setting(AppSettings::ArgRequiredElseHelp)
     .get_matches();
@@ -34,6 +36,9 @@ fn main() -> Result<(), Error> {
     let source = SourceBuilder::new().file(input_path).lines(input).build();
     let tokens = lexer::lex(&source);
     let tree = parser::parse(&source, tokens, &mut std::io::stdout());
-    interpret::interpret(tree, &source, &mut std::io::stdout());
+    match matches.value_of("ACTION") {
+        None | Some("llvm_interpret") => llvm_interpret::interpret(&tree, &source),
+        Some(action) => return Err(Error::UnknownAction(action.to_string())),
+    };
     Ok(())
 }
