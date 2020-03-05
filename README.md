@@ -2,7 +2,7 @@
 
 `tylang` is a compiled, statically typed language using LLVM as its code-generating backend.
 
-It doesn't do much, and only has one type so far: 64 bit integers, but has plans to support a much larger type system with powerful type inference (Hindley-Milner, most likely).
+It doesn't do much, and only has signed integers so far, but has plans to support a much larger type system with powerful type inference (Hindley-Milner, most likely).
 
 # Building
 
