@@ -27,13 +27,6 @@ impl From<Constant> for Expression {
 }
 
 impl Parser<'_> {
-    fn number(&self, token: Token) -> Result<usize> {
-        self.map
-            .numbers
-            .get(&token.id)
-            .cloned()
-            .ok_or(Error::Internal(format!("{:#?} is not a number", token)))
-    }
     pub(super) fn parse_constant(&mut self) -> Result<Constant> {
         let token = self.expect(TokenKind::Number)?;
         let span = token.span;

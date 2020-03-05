@@ -11,6 +11,7 @@ pub enum BinaryOpKind {
     Lte,
     Gt,
     Gte,
+    Eq,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -22,6 +23,10 @@ pub enum ExpressionKind {
         kind: BinaryOpKind,
         lhs: Rc<Expression>,
         rhs: Rc<Expression>,
+    },
+    Call {
+        name: String,
+        arguments: Vec<Expression>,
     },
 }
 
@@ -38,6 +43,16 @@ impl std::fmt::Display for ExpressionKind {
                 kind = kind,
                 lhs = *lhs,
                 rhs = *rhs
+            ),
+            Call { name, arguments } => write!(
+                f,
+                "{}({})",
+                name,
+                arguments
+                    .iter()
+                    .map(|arg| arg.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             ),
         }
     }
@@ -86,6 +101,10 @@ impl TryFrom<TokenKind> for BinaryOp {
                 kind: Gte,
                 precedence: 1,
             },
+            TokenKind::EqualsEquals => BinaryOp {
+                kind: Eq,
+                precedence: 1,
+            },
             TokenKind::Plus => BinaryOp {
                 kind: Add,
                 precedence: 2,
@@ -122,8 +141,7 @@ impl Parser<'_> {
     }
 
     fn parse_expression_in_context(&mut self, context: &mut Context) -> Result<Expression> {
-        let token = self.peek()?;
-        let expr = match token.kind {
+        let expr = match self.peek()?.kind {
             TokenKind::LeftParen => {
                 let left_paren = self.expect(TokenKind::LeftParen)?;
                 let expr = self.parse_expression()?;
@@ -133,7 +151,19 @@ impl Parser<'_> {
                     kind: ExpressionKind::Group(Rc::new(expr)),
                 }
             }
-            TokenKind::Identifier => self.parse_variable().map(Expression::from)?,
+            TokenKind::Identifier => {
+                let variable = self.expect(TokenKind::Identifier)?;
+                match self.peek()?.kind {
+                    TokenKind::LeftParen => self.parse_call(variable)?,
+                    _ => {
+                        let identifier = self.ident(variable)?;
+                        Expression::from(Variable {
+                            span: variable.span,
+                            identifier,
+                        })
+                    }
+                }
+            }
             TokenKind::Number => self.parse_constant().map(Expression::from)?,
             _ => {
                 return Err(Error::UnexpectedToken(String::from("expression")));
@@ -148,19 +178,16 @@ impl Parser<'_> {
         kind: Precedence,
         context: &mut Context,
     ) -> Result<Expression> {
-        if let Ok(token) = self.peek() {
-            if let Ok(op) = BinaryOp::try_from(token.kind) {
-                let precedence = context.precedence;
-                let parse_op = match kind {
-                    Precedence::Higher => op.precedence >= context.precedence,
-                    Precedence::Lower => op.precedence < context.precedence,
-                };
-                if parse_op {
-                    context.precedence = op.precedence;
-                    return Ok(self.parse_binary_op(expr, op.kind, context)?);
-                }
-                context.precedence = precedence;
+        if let Ok(op) = BinaryOp::try_from(self.peek()?.kind) {
+            let precedence = context.precedence;
+            if match kind {
+                Precedence::Higher => op.precedence >= context.precedence,
+                Precedence::Lower => op.precedence < context.precedence,
+            } {
+                context.precedence = op.precedence;
+                return Ok(self.parse_binary_op(expr, op.kind, context)?);
             }
+            context.precedence = precedence;
         }
         Ok(expr)
     }
@@ -180,6 +207,28 @@ impl Parser<'_> {
         };
         expr = self.maybe_parse_binary_op_of_precedence(expr, Precedence::Lower, context)?;
         Ok(expr)
+    }
+
+    fn parse_call(&mut self, func: Token) -> Result<Expression> {
+        let _left_paren = self.expect(TokenKind::LeftParen)?;
+        let right_paren;
+        let arguments = {
+            let mut arguments = Vec::new();
+            loop {
+                match self.peek()?.kind {
+                    TokenKind::RightParen => {
+                        right_paren = self.advance()?;
+                        break arguments;
+                    }
+                    _ => arguments.push(self.parse_expression()?),
+                }
+            }
+        };
+        let name = self.ident(func)?;
+        Ok(Expression {
+            span: span!(func, right_paren),
+            kind: ExpressionKind::Call { name, arguments },
+        })
     }
 }
 

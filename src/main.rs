@@ -1,3 +1,5 @@
+#![feature(associated_type_defaults)]
+
 use clap::{clap_app, AppSettings};
 use std::fs;
 
@@ -36,9 +38,11 @@ fn main() -> Result<(), Error> {
     let source = SourceBuilder::new().file(input_path).source(input).build();
     let tokens = lexer::lex(&source);
     let tree = parser::parse(&source, tokens, &mut std::io::stdout());
-    match matches.value_of("ACTION") {
-        None | Some("llvm_interpret") => llvm_interpret::interpret(&tree, &source),
-        Some(action) => return Err(Error::UnknownAction(action.to_string())),
-    };
+    if tree.valid() {
+        match matches.value_of("ACTION") {
+            None | Some("llvm_interpret") => llvm_interpret::interpret(&tree, &source),
+            Some(action) => return Err(Error::UnknownAction(action.to_string())),
+        };
+    }
     Ok(())
 }

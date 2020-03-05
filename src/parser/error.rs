@@ -10,12 +10,17 @@ pub(super) enum Error {
 impl Parser<'_> {
     pub(super) fn report_err(&mut self, err: Error) {
         || -> std::io::Result<()> {
+            self.any_errors = true;
             write!(self.out, "\nParseError: ")?;
             match err {
                 Error::EOF => writeln!(self.out, "unexpected EOF")?,
                 Error::Internal(ref message) => writeln!(self.out, "internal: {}", message)?,
                 Error::UnexpectedToken(ref expected) => {
-                    writeln!(self.out, "expected `{}`", expected)?
+                    let mut message = format!("expected {}", expected);
+                    if let Ok(token) = self.peek() {
+                        message += &format!(", got {}", token.kind);
+                    }
+                    writeln!(self.out, "{}", message)?;
                 }
             }
             if let Some(token) = self.peek().ok() {

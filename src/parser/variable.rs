@@ -27,16 +27,6 @@ impl From<Variable> for Expression {
 }
 
 impl Parser<'_> {
-    fn ident(&self, token: Token) -> Result<String> {
-        self.map
-            .idents
-            .get(&token.id)
-            .cloned()
-            .ok_or(Error::Internal(format!(
-                "{:#?} is not an identifier",
-                token
-            )))
-    }
     pub(super) fn parse_variable(&mut self) -> Result<Variable> {
         let token = self.expect(TokenKind::Identifier)?;
         let span = token.span;

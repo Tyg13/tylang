@@ -8,11 +8,14 @@ mod error;
 mod expression;
 mod function;
 mod statement;
+mod r#type;
 mod variable;
 pub mod visit;
 pub use constant::*;
 use error::*;
 pub use expression::*;
+pub use function::*;
+pub use r#type::*;
 pub use statement::*;
 pub use variable::*;
 pub use visit::Visitor;
@@ -20,6 +23,7 @@ pub use visit::Visitor;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Scope {
     pub statements: Vec<Statement>,
+    pub span: Span,
 }
 
 impl std::fmt::Display for Scope {
@@ -33,13 +37,7 @@ impl std::fmt::Display for Scope {
     }
 }
 
-impl Scope {
-    fn new() -> Self {
-        Self { statements: vec![] }
-    }
-}
-
-pub fn parse(source: &Source, map: TokenMap, out: &mut dyn std::io::Write) -> Scope {
+pub fn parse(source: &Source, map: TokenMap, out: &mut dyn std::io::Write) -> Tree {
     Parser::new(source, map, out).parse()
 }
 
@@ -51,6 +49,18 @@ pub struct Parser<'a> {
     map: TokenMap,
     index: usize,
     backtrack_index: usize,
+    any_errors: bool,
+}
+
+pub struct Tree {
+    pub functions: Vec<Function>,
+    any_errors: bool,
+}
+
+impl Tree {
+    pub fn valid(&self) -> bool {
+        !self.any_errors
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -61,12 +71,28 @@ impl<'a> Parser<'a> {
             map,
             index: 0,
             backtrack_index: 0,
+            any_errors: false,
         }
     }
 
-    fn parse(self) -> Scope {
-        let mut this = self;
-        this.parse_scope()
+    fn parse(mut self) -> Tree {
+        let mut functions = Vec::new();
+        while let Ok(_) = self.peek() {
+            match self.parse_function() {
+                Ok(function) => functions.push(function),
+                Err(err) => {
+                    self.backtrack();
+                    self.report_err(err);
+                    if let Err(Error::EOF) = self.advance_until(TokenKind::RightBrace) {
+                        break;
+                    }
+                }
+            }
+        }
+        Tree {
+            functions,
+            any_errors: self.any_errors,
+        }
     }
 
     fn peek(&mut self) -> Result<Token> {
@@ -86,15 +112,15 @@ impl<'a> Parser<'a> {
         Ok(token)
     }
 
-    fn advance_until(&mut self, kind: TokenKind) -> Option<Token> {
+    fn advance_until(&mut self, kind: TokenKind) -> Result<Token> {
         loop {
             match self.advance() {
                 Ok(token) => {
                     if token.kind == kind {
-                        return Some(token);
+                        return Ok(token);
                     }
                 }
-                Err(Error::EOF) => return None,
+                eof @ Err(Error::EOF) => return eof,
                 Err(_) => continue,
             }
         }
@@ -120,6 +146,25 @@ impl<'a> Parser<'a> {
         }
         Ok(token)
     }
+
+    fn ident(&self, token: Token) -> Result<String> {
+        self.map
+            .idents
+            .get(&token.id)
+            .cloned()
+            .ok_or(Error::Internal(format!(
+                "{:#?} is not an identifier",
+                token
+            )))
+    }
+
+    fn number(&self, token: Token) -> Result<usize> {
+        self.map
+            .numbers
+            .get(&token.id)
+            .cloned()
+            .ok_or(Error::Internal(format!("{:#?} is not a number", token)))
+    }
 }
 
 #[cfg(test)]
@@ -141,22 +186,22 @@ mod tests {
     }
     #[macro_export]
     macro_rules! tree {
-        [$source:literal, $($entry:ident { $($args:tt)* },)*] => {{
+        [$source:expr, $($entry:ident { $($args:tt)* },)*] => {{
             let mut map = $crate::lexer::TokenMap::new();
             macro_rules! token {
-                { $kind:ident, $span:expr } => {
+                { $span:expr, $kind:ident } => {
                     map.add_token(TokenKind::$kind, $span);
                 }
             }
             #[allow(unused_macros)]
             macro_rules! identifier {
-                { $name:expr, $span:expr } => {
+                { $span:expr, $name:expr } => {
                     map.add_ident(String::from($name), $span);
                 }
             }
             #[allow(unused_macros)]
             macro_rules! number {
-                { $value:expr, $span:expr } => {
+                { $span:expr, $value:expr } => {
                     map.add_number($value, $span);
                 }
             }
@@ -176,5 +221,30 @@ mod tests {
         ($out:expr) => {
             assert_eq!(String::from(""), $out)
         };
+    }
+
+    #[macro_export]
+    macro_rules! function {
+        ($func_name:literal, $body:literal, $($entry:ident { $span:expr, $($args:tt)* },)*) => {{
+            let input = concat!("fn ", $func_name, " {\n", $body, "\n}");
+            let identifier_len = $func_name.len();
+            let last_line = [$($span,)*].max_by_key(|span| span.end.line).unwrap_or(3);
+            tree! [
+                input,
+                token      { span!(1:01                     , 1:03                     ), Fn         },
+                identifier { span!(1:04                     , 1:04 + identifier_len    ), $func_name },
+                token      { span!(1:04 + identifier_len + 1, 1:04 + identifier_len + 2), LeftParen  },
+                $(
+                    $entry {
+                        span!(
+                            $span.start.line + 1 : $span.start.column,
+                            $span.end  .line + 1 : $span.end.column
+                        )
+                        $($args)*
+                    },
+                )*
+                token      { span!(last_line:01, last_line:02), LeftParen  },
+            ]
+        }};
     }
 }

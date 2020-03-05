@@ -54,6 +54,7 @@ declare_tokens!(
         If => "if",
         Let => "let",
         Return => "return",
+        Fn => "fn",
     }
     single => {
         Equals => "=",
@@ -88,6 +89,7 @@ declare_tokens!(
         AmpAmp => "&&",
         LeftAngleEquals => "<=",
         RightAngleEquals => ">=",
+        Arrow => "->",
     }
 );
 
@@ -187,68 +189,72 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn scan_token(&mut self, first: char, chars: &mut Chars<'_>) {
+    fn try_scan_single(&mut self, first: char, chars: &mut Chars<'_>) -> Option<TokenKind> {
         use TokenKind::*;
-        macro_rules! scan {
-            {$($type:ident { $($case:literal => $tokens:expr,)* }),+, { $rest:expr }} => {
-                match first {
-                    $($($case => {
-                        let (kind, len) = $type!($case, $tokens);
-                        self.map.add_token(kind, self.span(len))
-                    })*)*
-                    _ => $rest,
-                }
+        let kind = Some(match first {
+            '^' => Caret,
+            '~' => Tilde,
+            '?' => Question,
+            '.' => Dot,
+            ',' => Comma,
+            '!' => Not,
+            ';' => SemiColon,
+            '*' => Star,
+            '+' => Plus,
+            '/' => Slash,
+            '(' => LeftParen,
+            ')' => RightParen,
+            '{' => LeftBrace,
+            '}' => RightBrace,
+            '[' => LeftBracket,
+            ']' => RightBracket,
+            '<' => LeftAngle,
+            '>' => RightAngle,
+            _ => return None,
+        });
+        chars.next();
+        kind
+    }
+
+    fn try_scan_double(
+        &mut self,
+        first: char,
+        chars: &mut Chars<'_>,
+    ) -> Option<(usize, TokenKind)> {
+        use TokenKind::*;
+        macro_rules! double {
+            ($(($first:literal, $second:literal) => ($single:ident, $double:ident),)*) => {
+                Some(match first {
+                    $($first => {
+                        chars.next();
+                        match chars.peek() {
+                            Some(&c) if c == $second => {
+                                chars.next();
+                                (2, $double)
+                            }
+                            _ => (1, $single),
+                        }
+                    })*
+                    _ => return None,
+                })
             }
         }
-        macro_rules! single {
-            ($char:literal, $token:expr) => {{
-                chars.next();
-                ($token, 1)
-            }};
+        double! {
+            ('=', '=') => (Equals, EqualsEquals),
+            (':', ':') => (Colon, ColonColon),
+            ('|', '|') => (Bar, BarBar),
+            ('&', '&') => (Amp, AmpAmp),
+            ('-', '>') => (Minus, Arrow),
         }
-        macro_rules! double {
-            ($char:literal, $tokens:expr) => {{
-                let single = $tokens.0;
-                let double = $tokens.1;
-                chars.next();
-                match chars.peek() {
-                    Some(&c) if c == $char => {
-                        chars.next();
-                        (double, 2)
-                    }
-                    _ => (single, 1),
-                }
-            }};
-        }
-        let token = scan! {
-            single {
-                '^' => Caret,
-                '~' => Tilde,
-                '?' => Question,
-                '.' => Dot,
-                ',' => Comma,
-                '!' => Not,
-                ';' => SemiColon,
-                '*' => Star,
-                '+' => Plus,
-                '-' => Minus,
-                '/' => Slash,
-                '(' => LeftParen,
-                ')' => RightParen,
-                '{' => LeftBrace,
-                '}' => RightBrace,
-                '[' => LeftBracket,
-                ']' => RightBracket,
-                '<' => LeftAngle,
-                '>' => RightAngle,
-            },
-            double {
-                '=' => (Equals, EqualsEquals),
-                ':' => (Colon, ColonColon),
-                '|' => (Bar, BarBar),
-                '&' => (Amp, AmpAmp),
-            },
-            {
+    }
+
+    fn scan_token(&mut self, first: char, chars: &mut Chars<'_>) {
+        let token = {
+            if let Some(single) = self.try_scan_single(first, chars) {
+                self.map.add_token(single, self.span(1))
+            } else if let Some((len, double)) = self.try_scan_double(first, chars) {
+                self.map.add_token(double, self.span(len))
+            } else {
                 if first == '"' {
                     self.scan_string(chars)
                 } else if first.is_numeric() {

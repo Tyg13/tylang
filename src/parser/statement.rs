@@ -4,6 +4,7 @@ use super::*;
 pub enum StatementKind {
     Declaration {
         var: Variable,
+        type_: Type,
         initializer: Option<Expression>,
     },
     Assignment {
@@ -15,7 +16,7 @@ pub enum StatementKind {
     Expression(Expression),
     If {
         condition: Rc<Expression>,
-        block: Rc<Statement>,
+        block: Rc<Scope>,
     },
     Null,
 }
@@ -24,8 +25,12 @@ impl std::fmt::Display for StatementKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use StatementKind::*;
         match self {
-            Declaration { var, initializer } => match initializer {
-                Some(expr) => write!(f, "{} = {}", var, expr),
+            Declaration {
+                var,
+                type_,
+                initializer,
+            } => match initializer {
+                Some(expr) => write!(f, "{}: {} = {}", var, type_, expr),
                 None => write!(f, "{}", var),
             },
             Assignment { dst, src } => write!(f, "{} = {}", dst, src),
@@ -56,36 +61,36 @@ impl std::fmt::Display for Statement {
 }
 
 impl Parser<'_> {
-    pub(super) fn parse_scope(&mut self) -> Scope {
-        let mut any_errors = false;
+    pub(super) fn parse_scope(&mut self) -> Result<Scope> {
+        let left_brace = self.expect(TokenKind::LeftBrace)?;
         let mut statements = Vec::new();
-        loop {
-            match self.parse_statement() {
-                Ok(Some(statement)) => statements.push(statement),
-                Ok(None) => break,
-                Err(err) => {
-                    any_errors = true;
-                    self.backtrack();
-                    self.report_err(err);
-                    if let None = self.advance_until(TokenKind::SemiColon) {
-                        break;
-                    }
+        let right_brace = loop {
+            let token = self.peek()?;
+            match token.kind {
+                TokenKind::RightBrace => {
+                    self.advance()?;
+                    break token;
                 }
-            };
-        }
-        // Hack to prevent interpreter running for now
-        if any_errors {
-            statements.clear();
-        }
-        Scope { statements }
+                _ => {
+                    match self.parse_statement() {
+                        Ok(statement) => statements.push(statement),
+                        Err(err) => {
+                            self.backtrack();
+                            self.report_err(err);
+                            self.advance_until(TokenKind::SemiColon)?;
+                        }
+                    };
+                }
+            }
+        };
+        Ok(Scope {
+            statements,
+            span: span!(left_brace, right_brace),
+        })
     }
 
-    fn parse_statement(&mut self) -> Result<Option<Statement>> {
-        let token = match self.peek() {
-            Ok(token) => token,
-            Err(Error::EOF) => return Ok(None),
-            Err(err) => return Err(err),
-        };
+    fn parse_statement(&mut self) -> Result<Statement> {
+        let token = self.peek()?;
         match token.kind {
             TokenKind::Let => self.parse_declaration(),
             TokenKind::Return => self.parse_print(),
@@ -97,12 +102,13 @@ impl Parser<'_> {
                 .parse_expr_statement()
                 .map_err(|_| Error::UnexpectedToken(String::from("statement"))),
         }
-        .map(Some)
     }
 
     fn parse_declaration(&mut self) -> Result<Statement> {
         let let_keyword = self.expect(TokenKind::Let)?;
         let var = self.parse_variable()?;
+        let _colon = self.expect(TokenKind::Colon)?;
+        let type_ = self.parse_type()?;
         let initializer = if self.maybe(TokenKind::Equals).is_some() {
             Some(self.parse_expression()?)
         } else {
@@ -111,7 +117,11 @@ impl Parser<'_> {
         let semi = self.expect(TokenKind::SemiColon)?;
         Ok(Statement {
             span: span!(let_keyword, semi),
-            kind: StatementKind::Declaration { var, initializer },
+            kind: StatementKind::Declaration {
+                var,
+                type_,
+                initializer,
+            },
         })
     }
 
@@ -136,26 +146,10 @@ impl Parser<'_> {
         })
     }
 
-    pub(super) fn parse_local_scope(&mut self) -> Result<Statement> {
-        let left_brace = self.expect(TokenKind::LeftBrace)?;
-        let right_brace;
-        let new_scope = {
-            let mut new_scope = Scope::new();
-            loop {
-                if let Some(brace) = self.maybe(TokenKind::RightBrace) {
-                    right_brace = brace;
-                    break new_scope;
-                }
-                match self.parse_statement() {
-                    Ok(Some(statement)) => new_scope.statements.push(statement),
-                    Ok(None) => return Err(Error::EOF),
-                    Err(e) => return Err(e),
-                };
-            }
-        };
-        Ok(Statement {
-            span: span!(left_brace, right_brace),
-            kind: StatementKind::Scope(new_scope),
+    fn parse_local_scope(&mut self) -> Result<Statement> {
+        self.parse_scope().map(|scope| Statement {
+            span: scope.span,
+            kind: StatementKind::Scope(scope),
         })
     }
 
@@ -171,7 +165,7 @@ impl Parser<'_> {
     fn parse_if_statement(&mut self) -> Result<Statement> {
         let _if = self.expect(TokenKind::If)?;
         let condition = Rc::new(self.parse_expression()?);
-        let block = Rc::new(self.parse_local_scope()?);
+        let block = Rc::new(self.parse_scope()?);
         Ok(Statement {
             span: span!(_if, block),
             kind: StatementKind::If { condition, block },
@@ -190,17 +184,18 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{assert_empty, expr_con, expr_var, span, stmt, tree, var};
+    use crate::{assert_empty, expr_con, expr_var, function, span, stmt, tree, var};
 
     #[test]
     fn declaration() {
-        let (tree, stdout) = tree![
+        let (tree, stdout) = function![
+            "foo",
             "let x = 10;",
-            token      { Let,       span!(1:01, 1:04) },
-            identifier { "x",       span!(1:05, 1:06) },
-            token      { Equals,    span!(1:07, 1:08) },
-            number     { 10,        span!(1:09, 1:11) },
-            token      { SemiColon, span!(1:11, 1:12) },
+            token      { span!(1:01, 1:04), Let       },
+            identifier { span!(1:05, 1:06), "x"       },
+            token      { span!(1:07, 1:08), Equals    },
+            number     { span!(1:09, 1:11), 10        },
+            token      { span!(1:11, 1:12), SemiColon },
         ];
         assert_empty!(stdout);
         assert_eq!(
@@ -247,14 +242,14 @@ mod tests {
             "Declaration with variable initializer"
         );
         let (tree, stdout) = tree![
-            "let x;",
+            "fn a() { let x;",
             token      { Let,       span!(1:01, 1:04) },
             identifier { "x",       span!(1:05, 1:06) },
             token      { SemiColon, span!(1:06, 1:07) },
         ];
         assert_empty!(stdout);
         assert_eq!(
-            tree.statements,
+            tree.functions[0].body.unwrap().statements,
             vec![stmt! {
                 span!(1:01, 1:07),
                 Declaration {
@@ -269,24 +264,30 @@ mod tests {
     #[test]
     fn assignment() {
         let (tree, stdout) = tree![
-            "x = x;",
-            identifier { "x",       span!(1:01, 1:02) },
-            token      { Equals,    span!(1:03, 1:04) },
-            identifier { "x",       span!(1:05, 1:06) },
-            token      { SemiColon, span!(1:06, 1:07) },
+            "fn a() { x = x; }",
+            token      { span!(1:01, 1:03), Fn         },
+            identifier { span!(1:04, 1:05), "a"        },
+            token      { span!(1:05, 1:06), LeftParen  },
+            token      { span!(1:06, 1:07), RightParen },
+            token      { span!(1:08, 1:09), LeftBrace  },
+            identifier { span!(1:10, 1:11), "x"        },
+            token      { span!(1:12, 1:13), Equals     },
+            identifier { span!(1:14, 1:15), "x"        },
+            token      { span!(1:15, 1:16), SemiColon  },
+            token      { span!(1:17, 1:18), RightBrace },
         ];
         assert_empty!(stdout);
         assert_eq!(
-            tree.statements,
+            tree.functions[0].body.unwrap().statements,
             vec![stmt! {
-                span!(1:01, 1:07),
+                span!(1:10, 1:16),
                 Assignment {
                     dst: expr_var! {
-                        span!(1:01, 1:02),
+                        span!(1:10, 1:11),
                         "x"
                     },
                     src: expr_var! {
-                        span!(1:05, 1:06),
+                        span!(1:14, 1:15),
                         "x"
                     }
                 }
