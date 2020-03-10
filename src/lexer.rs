@@ -208,8 +208,6 @@ impl<'a> Lexer<'a> {
             '}' => RightBrace,
             '[' => LeftBracket,
             ']' => RightBracket,
-            '<' => LeftAngle,
-            '>' => RightAngle,
             _ => return None,
         });
         chars.next();
@@ -245,6 +243,8 @@ impl<'a> Lexer<'a> {
             ('|', '|') => (Bar, BarBar),
             ('&', '&') => (Amp, AmpAmp),
             ('-', '>') => (Minus, Arrow),
+            ('<', '=') => (LeftAngle, LeftAngleEquals),
+            ('>', '=') => (RightAngle, RightAngleEquals),
         }
     }
 

@@ -220,7 +220,11 @@ impl Parser<'_> {
                         right_paren = self.advance()?;
                         break arguments;
                     }
-                    _ => arguments.push(self.parse_expression()?),
+                    _ => {
+                        let expr = arguments.push(self.parse_expression()?);
+                        self.maybe(TokenKind::Comma);
+                        expr
+                    }
                 }
             }
         };
@@ -397,9 +401,9 @@ mod tests {
     #[macro_export]
     macro_rules! expr {
         ($span:expr, $kind:ident $($args:tt)+) => {
-            $crate::parser::Expression {
+            $crate::ast::Expression {
                 span: $span,
-                kind: $crate::parser::ExpressionKind::$kind $($args)+
+                kind: $crate::ast::ExpressionKind::$kind $($args)+
             }
         };
     }
@@ -421,7 +425,7 @@ mod tests {
             $crate::expr!(
                 $span,
                 BinaryOp {
-                    kind: $crate::parser::BinaryOpKind::$op,
+                    kind: $crate::ast::BinaryOpKind::$op,
                     lhs: Rc::new($lhs),
                     rhs: Rc::new($rhs),
                 }

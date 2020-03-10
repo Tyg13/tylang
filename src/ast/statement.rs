@@ -299,9 +299,9 @@ mod tests {
     #[macro_export]
     macro_rules! stmt {
         ($span:expr, $kind:ident $($args:tt)+) => {
-            $crate::parser::Statement {
+            $crate::ast::Statement {
                 span: $span,
-                kind: $crate::parser::StatementKind::$kind $($args)+
+                kind: $crate::ast::StatementKind::$kind $($args)+
             }
         };
     }

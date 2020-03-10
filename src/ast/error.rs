@@ -36,7 +36,7 @@ impl Parser<'_> {
             }
             Ok(())
         }()
-        .expect("couldn't write to parser out");
+        .expect("couldn't write to ast parser out");
     }
 }
 

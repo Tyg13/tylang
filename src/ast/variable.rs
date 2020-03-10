@@ -40,7 +40,7 @@ mod tests {
     #[macro_export]
     macro_rules! var {
         ($span:expr, $ident:expr) => {
-            $crate::parser::Variable {
+            $crate::ast::Variable {
                 span: $span,
                 identifier: String::from($ident),
             }

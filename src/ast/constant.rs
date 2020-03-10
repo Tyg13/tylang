@@ -40,7 +40,7 @@ mod tests {
     #[macro_export]
     macro_rules! con {
         ($span:expr, $value:expr) => {
-            $crate::parser::Constant {
+            $crate::ast::Constant {
                 span: $span,
                 value: $value,
             }

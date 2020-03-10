@@ -1,4 +1,4 @@
-use crate::parser::{self, Visitor};
+use crate::ast::{self, Visitor};
 use crate::util::Source;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -9,13 +9,25 @@ use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
 use std::collections::HashMap;
 
-type Variables<'ctx> = HashMap<String, PointerValue<'ctx>>;
+type Variables<'ctx> = HashMap<String, Variable<'ctx>>;
 type Parameters = HashMap<String, Parameter>;
 
+#[derive(Clone, PartialEq, Debug)]
 struct Parameter {
     function: String,
     index: usize,
-    type_: parser::Type,
+    type_: ast::Type,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+struct Variable<'ctx> {
+    address: PointerValue<'ctx>,
+}
+
+impl<'ctx> Variable<'ctx> {
+    fn new(address: PointerValue<'ctx>) -> Self {
+        Self { address }
+    }
 }
 
 struct Scope<'ctx> {
@@ -32,8 +44,8 @@ impl Scope<'_> {
     }
 }
 
-struct Interpreter<'ctx> {
-    tree: &'ctx parser::Tree,
+struct Compiler<'ctx> {
+    tree: &'ctx ast::Tree,
     source: &'ctx Source,
     context: &'ctx Context,
     module: Module<'ctx>,
@@ -41,9 +53,9 @@ struct Interpreter<'ctx> {
     scope_stack: Vec<Scope<'ctx>>,
 }
 
-impl<'ctx> Interpreter<'ctx> {
+impl<'ctx> Compiler<'ctx> {
     fn new(
-        tree: &'ctx parser::Tree,
+        tree: &'ctx ast::Tree,
         source: &'ctx Source,
         context: &'ctx Context,
         module: Module<'ctx>,
@@ -63,7 +75,7 @@ impl<'ctx> Interpreter<'ctx> {
         self.scope_stack.last_mut().expect("Scope stack empty!")
     }
 
-    fn interpret(&mut self) {
+    fn compile(&mut self) {
         self.visit_tree(&self.tree);
 
         let source_file = self.source.file();
@@ -101,14 +113,14 @@ impl<'ctx> Interpreter<'ctx> {
             .expect("Error writing assembly file!");
     }
 
-    fn expr_value(&self, expr: &parser::Expression) -> BasicValueEnum<'ctx> {
+    fn expr_value(&self, expr: &ast::Expression) -> BasicValueEnum<'ctx> {
+        use ast::ExpressionKind::*;
         use inkwell::IntPredicate::*;
-        use parser::ExpressionKind::*;
         match &expr.kind {
             BinaryOp { kind, lhs, rhs } => {
                 let lhs = self.expr_value(lhs).into_int_value();
                 let rhs = self.expr_value(rhs).into_int_value();
-                use parser::BinaryOpKind::*;
+                use ast::BinaryOpKind::*;
                 BasicValueEnum::from(match kind {
                     Add => self.builder.build_int_add(lhs, rhs, "sum"),
                     Sub => self.builder.build_int_sub(lhs, rhs, "diff"),
@@ -133,38 +145,68 @@ impl<'ctx> Interpreter<'ctx> {
             Constant(cons) => {
                 BasicValueEnum::from(self.context.i64_type().const_int(cons.value as u64, false))
             }
-            Variable(var) => {
-                let addr = self.var_addr(&var.identifier);
-                self.builder.build_load(addr, "tmp")
-            }
+            Variable(var) => self.var_value(&var.identifier),
             Group(inner) => self.expr_value(inner),
         }
     }
 
-    fn var_addr(&self, name: &str) -> PointerValue<'ctx> {
-        for scope in self.scope_stack.iter().rev() {
-            if let Some(var) = scope.variables.get(name) {
-                return var.clone();
-            }
-            if let Some(param) = scope.parameters.get(name) {
-                let value = self
-                    .module
-                    .get_function(&param.function)
-                    .expect("can't find param function")
-                    .get_nth_param(param.index as u32)
-                    .expect("can't find param")
-                    .into_int_value();
-                let addr = self.builder.build_alloca(self.type_(&param.type_), name);
-                self.builder.build_store(addr, value);
-                return addr;
-            }
+    fn var_value(&self, name: &str) -> BasicValueEnum<'ctx> {
+        if let Some(var) = self.var_in_scope(name) {
+            self.builder.build_load(var.address, "tmp")
+        } else if let Some(param) = self.param_in_scope(name) {
+            self.module
+                .get_function(&param.function)
+                .expect("can't find param function")
+                .get_nth_param(param.index as u32)
+                .expect("can't find param")
+        } else {
+            panic!("Undefined variable {}", name);
         }
-        panic!("Undefined variable {}", name);
     }
 
-    fn type_(&self, type_: &parser::Type) -> BasicTypeEnum<'ctx> {
-        use parser::BuiltinType::*;
-        use parser::TypeKind::*;
+    fn var_address(&mut self, name: &str) -> PointerValue<'ctx> {
+        if let Some(var) = self.var_in_scope(name) {
+            var.address
+        } else if let Some(param) = self.param_in_scope(name) {
+            let value = self
+                .module
+                .get_function(&param.function)
+                .expect("can't find param function")
+                .get_nth_param(param.index as u32)
+                .expect("can't find param")
+                .into_int_value();
+            let addr = self.builder.build_alloca(self.type_(&param.type_), "param");
+            self.builder.build_store(addr, value);
+            self.scope()
+                .variables
+                .insert(String::from(name), Variable::new(addr));
+            addr
+        } else {
+            panic!("Undefined variable {}", name);
+        }
+    }
+
+    fn var_in_scope(&self, name: &str) -> Option<Variable<'ctx>> {
+        for scope in self.scope_stack.iter().rev() {
+            if let Some(var) = scope.variables.get(name) {
+                return Some(var.clone());
+            }
+        }
+        return None;
+    }
+
+    fn param_in_scope(&self, name: &str) -> Option<Parameter> {
+        for scope in self.scope_stack.iter().rev() {
+            if let Some(param) = scope.parameters.get(name) {
+                return Some(param.clone());
+            }
+        }
+        return None;
+    }
+
+    fn type_(&self, type_: &ast::Type) -> BasicTypeEnum<'ctx> {
+        use ast::BuiltinType::*;
+        use ast::TypeKind::*;
         match &type_.kind {
             Builtin(kind) => BasicTypeEnum::from(match kind {
                 I8 => self.context.i8_type(),
@@ -195,9 +237,9 @@ impl<'ctx> Interpreter<'ctx> {
     }
 }
 
-use parser::visit;
-impl parser::Visitor for Interpreter<'_> {
-    fn visit_function(&mut self, function: &parser::Function) {
+use ast::visit;
+impl ast::Visitor for Compiler<'_> {
+    fn visit_function(&mut self, function: &ast::Function) {
         let param_types: Vec<_> = function
             .parameters
             .iter()
@@ -234,14 +276,14 @@ impl parser::Visitor for Interpreter<'_> {
         }
     }
 
-    fn visit_scope(&mut self, scope: &parser::Scope) {
+    fn visit_scope(&mut self, scope: &ast::Scope) {
         self.scope_stack.push(Scope::new());
         visit::walk_scope(self, scope);
         self.scope_stack.pop();
     }
 
-    fn visit_statement(&mut self, stmt: &parser::Statement) {
-        use parser::StatementKind::*;
+    fn visit_statement(&mut self, stmt: &ast::Statement) {
+        use ast::StatementKind::*;
         match &stmt.kind {
             Declaration {
                 var,
@@ -255,12 +297,14 @@ impl parser::Visitor for Interpreter<'_> {
                     None => self.default(&var_type),
                 };
                 self.builder.build_store(addr, initial_value);
-                self.scope().variables.insert(var.identifier.clone(), addr);
+                self.scope()
+                    .variables
+                    .insert(var.identifier.clone(), Variable::new(addr));
             }
             Assignment { dst, src } => {
-                use parser::ExpressionKind::*;
+                use ast::ExpressionKind::*;
                 let addr = match &dst.kind {
-                    Variable(var) => self.var_addr(&var.identifier),
+                    Variable(var) => self.var_address(&var.identifier),
                     _ => panic!("LHS of assignment is not a variable!"),
                 };
                 let value = self.expr_value(src);
@@ -296,11 +340,11 @@ impl parser::Visitor for Interpreter<'_> {
     }
 }
 
-pub fn interpret(tree: &parser::Tree, source: &Source) {
+pub fn compile(tree: &ast::Tree, source: &Source) {
     let context = &Context::create();
     let module = context.create_module(&source.file());
     let builder = context.create_builder();
     let _execution_engine = module.create_execution_engine().unwrap();
 
-    Interpreter::new(tree, source, context, module, builder).interpret();
+    Compiler::new(tree, source, context, module, builder).compile();
 }

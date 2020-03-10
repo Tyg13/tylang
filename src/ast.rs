@@ -108,7 +108,7 @@ impl<'a> Parser<'a> {
         self.index = self
             .index
             .checked_add(1)
-            .expect("Overflow in parser token index");
+            .expect("Overflow in ast parser token index");
         Ok(token)
     }
 
@@ -177,11 +177,11 @@ mod tests {
     fn stops_on_eof() {
         let source = SourceBuilder::new().build();
         let mut out = Vec::new();
-        let mut parser = Parser::new(&source, TokenMap::new(), &mut out);
-        assert_eq!(parser.advance(), Err(Error::EOF));
-        let old_index = parser.index;
-        assert_eq!(parser.advance(), Err(Error::EOF));
-        let new_index = parser.index;
+        let mut ast = Parser::new(&source, TokenMap::new(), &mut out);
+        assert_eq!(ast.advance(), Err(Error::EOF));
+        let old_index = ast.index;
+        assert_eq!(ast.advance(), Err(Error::EOF));
+        let new_index = ast.index;
         assert_eq!(old_index, new_index);
     }
     #[macro_export]
@@ -207,13 +207,13 @@ mod tests {
             }
             $( $entry! { $($args)* } )*;
             let mut out = Vec::new();
-            let tree = $crate::parser::parse(&$crate::util::SourceBuilder::new()
+            let tree = $crate::ast::parse(&$crate::util::SourceBuilder::new()
                 .source($source)
                 .build(),
                 map,
                 &mut out,
             );
-            (tree, String::from_utf8(out).expect("Non UTF-8 parser output!"))
+            (tree, String::from_utf8(out).expect("Non UTF-8 ast output!"))
         }}
     }
     #[macro_export]

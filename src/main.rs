@@ -3,9 +3,9 @@
 use clap::{clap_app, AppSettings};
 use std::fs;
 
+mod ast;
+mod compiler;
 mod lexer;
-mod llvm_interpret;
-mod parser;
 mod util;
 
 use util::SourceBuilder;
@@ -37,10 +37,10 @@ fn main() -> Result<(), Error> {
     }
     let source = SourceBuilder::new().file(input_path).source(input).build();
     let tokens = lexer::lex(&source);
-    let tree = parser::parse(&source, tokens, &mut std::io::stdout());
+    let tree = ast::parse(&source, tokens, &mut std::io::stdout());
     if tree.valid() {
         match matches.value_of("ACTION") {
-            None | Some("llvm_interpret") => llvm_interpret::interpret(&tree, &source),
+            None | Some("compile") => compiler::compile(&tree, &source),
             Some(action) => return Err(Error::UnknownAction(action.to_string())),
         };
     }
