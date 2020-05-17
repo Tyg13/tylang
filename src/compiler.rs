@@ -3,7 +3,7 @@ use crate::util::Source;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
-use inkwell::targets::{CodeModel, FileType, RelocMode, Target};
+use inkwell::targets::{CodeModel, FileType, RelocMode, Target, TargetMachine, TargetTriple};
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, OptimizationLevel};
@@ -11,6 +11,12 @@ use std::collections::HashMap;
 
 type Variables<'ctx> = HashMap<String, Variable<'ctx>>;
 type Parameters = HashMap<String, Parameter>;
+
+pub enum Action {
+    WriteIr,
+    WriteObject,
+    WriteAssembly,
+}
 
 #[derive(Clone, PartialEq, Debug)]
 struct Parameter {
@@ -51,6 +57,7 @@ struct Compiler<'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     scope_stack: Vec<Scope<'ctx>>,
+    target_machine: TargetMachine,
 }
 
 impl<'ctx> Compiler<'ctx> {
@@ -61,6 +68,17 @@ impl<'ctx> Compiler<'ctx> {
         module: Module<'ctx>,
         builder: Builder<'ctx>,
     ) -> Self {
+        let target = Target::from_name("x86-64").unwrap();
+        let target_machine = target
+            .create_target_machine(
+                &TargetTriple::create("x86_64-pc-linux-gnu"),
+                "x86-64",
+                "+avx2",
+                OptimizationLevel::None,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .unwrap();
         Self {
             tree,
             source,
@@ -68,6 +86,7 @@ impl<'ctx> Compiler<'ctx> {
             module,
             builder,
             scope_stack: vec![],
+            target_machine,
         }
     }
 
@@ -76,39 +95,33 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     fn compile(&mut self) {
+        log::debug!("Compiling {}", self.source.file());
         self.visit_tree(&self.tree);
+    }
 
-        let source_file = self.source.file();
-        let source_path = std::path::Path::new(&source_file);
-
-        let ir_path = source_path.with_extension("ir");
+    fn write_ir(&self) {
+        let ir_file = std::path::Path::new(&self.source.file()).with_extension("ir");
+        log::debug!("Writing LLVM IR to {}", ir_file.to_str().unwrap());
         self.module
-            .print_to_file(&ir_path)
-            .expect("Unable to write LLVM-IR!");
-
+            .print_to_file(&ir_file)
+            .expect("Unable to write LLVM IR!");
         if let Err(err) = self.module.verify() {
             println!("LLVM Error: {}", err.to_str().unwrap());
-            return;
         }
+    }
 
-        let target = Target::from_name("x86-64").unwrap();
-        let target_machine = target
-            .create_target_machine(
-                "x86_64-pc-linux-gnu",
-                "x86-64",
-                "+avx2",
-                OptimizationLevel::None,
-                RelocMode::Default,
-                CodeModel::Default,
-            )
-            .unwrap();
-        let object_file = source_path.with_extension("o");
-        target_machine
+    fn write_object_file(&self) {
+        let object_file = std::path::Path::new(&self.source.file()).with_extension("o");
+        log::debug!("Writing object code to {}", object_file.to_str().unwrap());
+        self.target_machine
             .write_to_file(&self.module, FileType::Object, &object_file)
             .expect("Error writing object file!");
+    }
 
-        let asm_file = source_path.with_extension("s");
-        target_machine
+    fn write_assembly_file(&self) {
+        let asm_file = std::path::Path::new(&self.source.file()).with_extension("s");
+        log::debug!("Writing assembly code to {}", asm_file.to_str().unwrap());
+        self.target_machine
             .write_to_file(&self.module, FileType::Assembly, &asm_file)
             .expect("Error writing assembly file!");
     }
@@ -205,7 +218,7 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     fn type_(&self, type_: &ast::Type) -> BasicTypeEnum<'ctx> {
-        use ast::BuiltinType::*;
+        use ast::Builtin::*;
         use ast::TypeKind::*;
         match &type_.kind {
             Builtin(kind) => BasicTypeEnum::from(match kind {
@@ -340,11 +353,17 @@ impl ast::Visitor for Compiler<'_> {
     }
 }
 
-pub fn compile(tree: &ast::Tree, source: &Source) {
+pub fn compile(tree: &ast::Tree, source: &Source, action: Action) {
     let context = &Context::create();
     let module = context.create_module(&source.file());
     let builder = context.create_builder();
     let _execution_engine = module.create_execution_engine().unwrap();
 
-    Compiler::new(tree, source, context, module, builder).compile();
+    let mut compiler = Compiler::new(tree, source, context, module, builder);
+    compiler.compile();
+    match action {
+        Action::WriteAssembly => compiler.write_assembly_file(),
+        Action::WriteIr => compiler.write_ir(),
+        Action::WriteObject => compiler.write_object_file(),
+    }
 }

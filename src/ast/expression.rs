@@ -1,4 +1,5 @@
 use super::*;
+use crate::lexer::{TokenKind, TokenTree, TreeKind};
 use std::convert::TryFrom;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -60,18 +61,12 @@ impl std::fmt::Display for ExpressionKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Expression {
-    pub span: Span,
     pub kind: ExpressionKind,
 }
 
 impl std::fmt::Display for Expression {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Expression({span} {kind})",
-            span = self.span,
-            kind = self.kind,
-        )
+        write!(f, "Expression({kind})", kind = self.kind,)
     }
 }
 
@@ -135,301 +130,98 @@ struct Context {
     precedence: usize,
 }
 
-impl Parser<'_> {
-    pub(super) fn parse_expression(&mut self) -> Result<Expression> {
-        self.parse_expression_in_context(&mut Context { precedence: 0 })
+impl Parser {
+    pub(super) fn parse_expression(&self, cursor: &mut Cursor) -> Option<Expression> {
+        self.parse_expression_in_context(&mut Context { precedence: 0 }, cursor)
     }
 
-    fn parse_expression_in_context(&mut self, context: &mut Context) -> Result<Expression> {
-        let expr = match self.peek()?.kind {
-            TokenKind::LeftParen => {
-                let left_paren = self.expect(TokenKind::LeftParen)?;
-                let expr = self.parse_expression()?;
-                let right_paren = self.expect(TokenKind::RightParen)?;
+    fn parse_expression_in_context(
+        &self,
+        context: &mut Context,
+        cursor: &mut Cursor,
+    ) -> Option<Expression> {
+        let expr = match cursor.peek()? {
+            TokenTree::Tree(tree) => {
+                let mut cursor = Cursor::new(&tree.children);
+                let inner = self.parse_expression(&mut cursor)?;
                 Expression {
-                    span: span!(left_paren, right_paren),
-                    kind: ExpressionKind::Group(Rc::new(expr)),
+                    kind: ExpressionKind::Group(Rc::new(inner)),
                 }
             }
-            TokenKind::Identifier => {
-                let variable = self.expect(TokenKind::Identifier)?;
-                match self.peek()?.kind {
-                    TokenKind::LeftParen => self.parse_call(variable)?,
-                    _ => {
-                        let identifier = self.ident(variable)?;
-                        Expression::from(Variable {
-                            span: variable.span,
-                            identifier,
-                        })
+            TokenTree::Token(token) => match token.kind {
+                TokenKind::Identifier => {
+                    let variable = cursor.expect_token(TokenKind::Identifier);
+                    let identifier = self.map.ident(variable).cloned()?;
+                    match cursor.peek()? {
+                        TokenTree::Tree(tree) => {
+                            if tree.kind != TreeKind::Parens {
+                                panic!("Unexpected {} instead of call arguments", tree.kind);
+                            }
+                            let mut cursor = Cursor::new(&tree.children);
+                            let arguments = self.parse_call(&mut cursor);
+                            Expression {
+                                kind: ExpressionKind::Call {
+                                    name: identifier,
+                                    arguments,
+                                },
+                            }
+                        }
+                        _ => Expression::from(Variable { identifier }),
                     }
                 }
-            }
-            TokenKind::Number => self.parse_constant().map(Expression::from)?,
-            _ => {
-                return Err(Error::UnexpectedToken(String::from("expression")));
-            }
+                TokenKind::Number => self.parse_constant(cursor).map(Expression::from)?,
+                _ => return None,
+            },
         };
-        Ok(self.maybe_parse_binary_op_of_precedence(expr, Precedence::Higher, context)?)
+        Some(self.maybe_parse_binary_op_of_precedence(expr, Precedence::Higher, context, cursor)?)
     }
 
     fn maybe_parse_binary_op_of_precedence(
-        &mut self,
+        &self,
         expr: Expression,
         kind: Precedence,
         context: &mut Context,
-    ) -> Result<Expression> {
-        if let Ok(op) = BinaryOp::try_from(self.peek()?.kind) {
+        cursor: &mut Cursor,
+    ) -> Option<Expression> {
+        if let Ok(op) = BinaryOp::try_from(cursor.peek_token()?.kind) {
             let precedence = context.precedence;
-            if match kind {
+            let should_parse = match kind {
                 Precedence::Higher => op.precedence >= context.precedence,
                 Precedence::Lower => op.precedence < context.precedence,
-            } {
+            };
+            if should_parse {
                 context.precedence = op.precedence;
-                return Ok(self.parse_binary_op(expr, op.kind, context)?);
+                return Some(self.parse_binary_op(expr, op.kind, context, cursor)?);
             }
             context.precedence = precedence;
         }
-        Ok(expr)
+        Some(expr)
     }
 
     fn parse_binary_op(
-        &mut self,
+        &self,
         lhs: Expression,
         kind: BinaryOpKind,
         context: &mut Context,
-    ) -> Result<Expression> {
-        let _ = self.advance()?;
+        cursor: &mut Cursor,
+    ) -> Option<Expression> {
+        cursor.next();
         let lhs = Rc::new(lhs);
-        let rhs = Rc::new(self.parse_expression_in_context(context)?);
+        let rhs = Rc::new(self.parse_expression_in_context(context, cursor)?);
         let mut expr = Expression {
-            span: span!(lhs, rhs),
             kind: ExpressionKind::BinaryOp { kind, lhs, rhs },
         };
-        expr = self.maybe_parse_binary_op_of_precedence(expr, Precedence::Lower, context)?;
-        Ok(expr)
+        expr =
+            self.maybe_parse_binary_op_of_precedence(expr, Precedence::Lower, context, cursor)?;
+        Some(expr)
     }
 
-    fn parse_call(&mut self, func: Token) -> Result<Expression> {
-        let _left_paren = self.expect(TokenKind::LeftParen)?;
-        let right_paren;
-        let arguments = {
-            let mut arguments = Vec::new();
-            loop {
-                match self.peek()?.kind {
-                    TokenKind::RightParen => {
-                        right_paren = self.advance()?;
-                        break arguments;
-                    }
-                    _ => {
-                        let expr = arguments.push(self.parse_expression()?);
-                        self.maybe(TokenKind::Comma);
-                        expr
-                    }
-                }
-            }
-        };
-        let name = self.ident(func)?;
-        Ok(Expression {
-            span: span!(func, right_paren),
-            kind: ExpressionKind::Call { name, arguments },
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{assert_empty, binary_op, expr, expr_con, expr_var, span, stmt, tree};
-    use pretty_assertions::assert_eq;
-
-    #[test]
-    fn binary_op() {
-        let (tree, stdout) = tree![
-            "x = 1 + 1;",
-            identifier { "x",       span!(1:01, 1:02) },
-            token      { Equals,    span!(1:03, 1:04) },
-            number     { 1,         span!(1:05, 1:06) },
-            token      { Plus,      span!(1:07, 1:08) },
-            number     { 1,         span!(1:09, 1:10) },
-            token      { SemiColon, span!(1:10, 1:11) },
-        ];
-        assert_empty!(stdout);
-        assert_eq!(
-            tree.statements,
-            vec![stmt! {
-                span!(1:01, 1:11),
-                Assignment {
-                    dst: expr_var! {
-                        span!(1:01, 1:02),
-                        "x"
-                    },
-                    src: binary_op! {
-                        span!(1:05, 1:10),
-                        Add,
-                        expr_con! {
-                            span!(1:05, 1:06),
-                            1
-                        },
-                        expr_con! {
-                            span!(1:09, 1:10),
-                            1
-                        }
-                    }
-                }
-            }],
-            "Basic addition"
-        );
-    }
-
-    #[test]
-    fn precedence() {
-        let (tree, stdout) = tree![
-            "x = 2 + 2*2;",
-            identifier { "x",       span!(1:01, 1:02) },
-            token      { Equals,    span!(1:03, 1:04) },
-            number     { 2,         span!(1:05, 1:06) },
-            token      { Plus,      span!(1:07, 1:08) },
-            number     { 2,         span!(1:09, 1:10) },
-            token      { Star,      span!(1:10, 1:11) },
-            number     { 2,         span!(1:11, 1:12) },
-            token      { SemiColon, span!(1:12, 1:13) },
-        ];
-        assert_empty!(stdout);
-        assert_eq!(
-            tree.statements,
-            vec![stmt! {
-                span!(1:01, 1:13),
-                Assignment {
-                    dst: expr_var! {
-                         span!(1:01, 1:02),
-                         "x"
-                    },
-                    src: binary_op! {
-                        span!(1:05, 1:12),
-                        Add,
-                        expr_con!(span!(1:05, 1:06), 2),
-                        binary_op! {
-                            span!(1:09, 1:12),
-                            Mul,
-                            expr_con!(span!(1:09, 1:10), 2),
-                            expr_con!(span!(1:11, 1:12), 2)
-                        }
-                    }
-                }
-            }],
-            "2 + 2 * 2 groups as 2 + (2 * 2)"
-        );
-        let (tree, stdout) = tree![
-            "x = 2 * 2+2;",
-            identifier { "x",       span!(1:01, 1:02) },
-            token      { Equals,    span!(1:03, 1:04) },
-            number     { 2,         span!(1:05, 1:06) },
-            token      { Star,      span!(1:07, 1:08) },
-            number     { 2,         span!(1:09, 1:10) },
-            token      { Plus,      span!(1:10, 1:11) },
-            number     { 2,         span!(1:11, 1:12) },
-            token      { SemiColon, span!(1:12, 1:13) },
-        ];
-        assert_empty!(stdout);
-        assert_eq!(
-            tree.statements,
-            vec![stmt! {
-                span!(1:01, 1:13),
-                Assignment {
-                    dst: expr_var! {
-                         span!(1:01, 1:02),
-                         "x"
-                    },
-                    src: binary_op! {
-                        span!(1:05, 1:12),
-                        Add,
-                        binary_op! {
-                            span!(1:05, 1:10),
-                            Mul,
-                            expr_con!(span!(1:05, 1:06), 2),
-                            expr_con!(span!(1:09, 1:10), 2)
-                        },
-                        expr_con!(span!(1:11, 1:12), 2)
-                    }
-                }
-            }],
-            "2 * 2 + 2 groups as (2 * 2) + 2"
-        );
-        let (tree, stdout) = tree![
-            "x = (2 + 2)*2;",
-            identifier { "x",        span!(1:01, 1:02) },
-            token      { Equals,     span!(1:03, 1:04) },
-            token      { LeftParen,  span!(1:05, 1:06) },
-            number     { 2,          span!(1:06, 1:07) },
-            token      { Plus,       span!(1:08, 1:09) },
-            number     { 2,          span!(1:10, 1:11) },
-            token      { RightParen, span!(1:11, 1:12) },
-            token      { Star,       span!(1:12, 1:13) },
-            number     { 2,          span!(1:13, 1:14) },
-            token      { SemiColon,  span!(1:14, 1:15) },
-        ];
-        assert_empty!(stdout);
-        assert_eq!(
-            tree.statements,
-            vec![stmt! {
-                span!(1:01, 1:15),
-                Assignment {
-                    dst: expr_var! {
-                         span!(1:01, 1:02),
-                         "x"
-                    },
-                    src: binary_op! {
-                        span!(1:05, 1:14),
-                        Mul,
-                        expr! {
-                            span!(1:05, 1:12),
-                            Group(Rc::new(binary_op! {
-                                span!(1:06, 1:11),
-                                Add,
-                                expr_con!(span!(1:06, 1:07), 2),
-                                expr_con!(span!(1:10, 1:11), 2)
-                            }))
-                        },
-                        expr_con!(span!(1:13, 1:14), 2)
-                    }
-                }
-            }],
-            "(2 * 2) + 2 groups as expected"
-        );
-    }
-
-    #[macro_export]
-    macro_rules! expr {
-        ($span:expr, $kind:ident $($args:tt)+) => {
-            $crate::ast::Expression {
-                span: $span,
-                kind: $crate::ast::ExpressionKind::$kind $($args)+
-            }
-        };
-    }
-    #[macro_export]
-    macro_rules! expr_var {
-        ($span:expr, $ident:expr) => {
-            $crate::expr!($span, Variable($crate::var!($span, $ident)));
-        };
-    }
-    #[macro_export]
-    macro_rules! expr_con {
-        ($span:expr, $value:expr) => {
-            $crate::expr!($span, Constant($crate::con!($span, $value)));
-        };
-    }
-    #[macro_export]
-    macro_rules! binary_op {
-        ($span:expr, $op:ident, $lhs:expr, $rhs:expr) => {
-            $crate::expr!(
-                $span,
-                BinaryOp {
-                    kind: $crate::ast::BinaryOpKind::$op,
-                    lhs: Rc::new($lhs),
-                    rhs: Rc::new($rhs),
-                }
-            )
-        };
+    fn parse_call(&self, cursor: &mut Cursor) -> Vec<Expression> {
+        let mut arguments = Vec::new();
+        while let Some(expr) = self.parse_expression(cursor) {
+            arguments.push(expr);
+            cursor.maybe_token(TokenKind::Comma);
+        }
+        arguments
     }
 }

@@ -1,69 +1,72 @@
 use super::*;
+use crate::lexer::{TokenKind, TokenTree, TreeKind};
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct Function {
-    pub span: Span,
     pub identifier: String,
     pub parameters: Vec<Parameter>,
     pub body: Option<Scope>,
     pub return_type: Type,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct Parameter {
-    pub span: Span,
     pub variable: Variable,
     pub type_: Type,
 }
 
-impl Parser<'_> {
-    pub(super) fn parse_function(&mut self) -> Result<Function> {
-        let _fn = self.expect(TokenKind::Fn)?;
+impl Parser {
+    pub(super) fn parse_function(&self, cursor: &mut Cursor<'_>) -> Function {
+        cursor.expect_token(TokenKind::Fn);
         let identifier = self
-            .expect(TokenKind::Identifier)
-            .and_then(|token| self.ident(token))?;
-        let parameters = self.parse_parameters()?;
-        let _arrow = self.expect(TokenKind::Arrow)?;
-        let return_type = self.parse_type()?;
-        let (span, body) = match self.peek()?.kind {
-            TokenKind::SemiColon => {
-                let semi = self.advance()?;
-                (span!(_fn, semi), None)
-            }
-            TokenKind::LeftBrace => {
-                let scope = self.parse_scope()?;
-                (span!(_fn, scope), Some(scope))
-            }
-            _ => return Err(Error::UnexpectedToken(format!("`;` or `{{`"))),
+            .map
+            .ident(&cursor.expect_token(TokenKind::Identifier))
+            .cloned()
+            .unwrap();
+        let parameters = {
+            let tree = cursor.expect_tree(TreeKind::Parens);
+            let mut cursor = Cursor::new(&tree.children);
+            self.parse_parameters(&mut cursor)
         };
-        Ok(Function {
-            span,
+        cursor.expect_token(TokenKind::Arrow);
+        let return_type = self
+            .parse_type(cursor)
+            .expect("Unable to parse return type in function.");
+        let body = if let Some(tree) = cursor.maybe_tree(TreeKind::Braces) {
+            let mut cursor = Cursor::new(&tree.children);
+            Some(self.parse_scope(&mut cursor))
+        } else {
+            cursor.expect_token(TokenKind::SemiColon);
+            None
+        };
+        Function {
             identifier,
             parameters,
             body,
             return_type,
-        })
+        }
     }
 
-    fn parse_parameters(&mut self) -> Result<Vec<Parameter>> {
-        let _left_paren = self.expect(TokenKind::LeftParen)?;
+    fn parse_parameters(&self, cursor: &mut Cursor) -> Vec<Parameter> {
         let mut parameters = Vec::new();
-        loop {
-            match self.peek()?.kind {
-                TokenKind::RightParen => {
-                    self.advance()?;
-                    return Ok(parameters);
+        while let Some(tree) = cursor.peek() {
+            match tree {
+                TokenTree::Tree(tree) => {
+                    panic!("Unexpected {} in parameter list", tree.kind);
                 }
                 _ => {
-                    let variable = self.parse_variable()?;
-                    let _colon = self.expect(TokenKind::Colon)?;
-                    let type_ = self.parse_type()?;
-                    parameters.push(Parameter {
-                        span: span!(variable, type_),
-                        variable,
-                        type_,
-                    });
-                    self.maybe(TokenKind::Comma);
+                    let variable = self
+                        .parse_variable(cursor)
+                        .expect("Couldn't parse variable in parameter list");
+                    cursor.expect_token(TokenKind::Colon);
+                    let type_ = self
+                        .parse_type(cursor)
+                        .expect("Couldn't parse type in parameter list");
+                    parameters.push(Parameter { variable, type_ });
+                    cursor.maybe_token(TokenKind::Comma);
                 }
             }
         }
+        parameters
     }
 }
