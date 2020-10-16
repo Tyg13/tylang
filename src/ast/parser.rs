@@ -1,213 +1,273 @@
-use crate::ast::{Function, Tree};
-use crate::lexer::{Token, TokenKind, TokenMap, TokenTree, Tree as SubTree, TreeKind};
+use crate::ast::error::ErrorHandler;
+use crate::ast::{ExpectedError, Tree};
+use crate::lexer::{Token, TokenKind, Tokens};
 
-pub fn parse(map: TokenMap) -> Tree {
-    Parser::new(map).parse()
+pub struct Parser<'tokens, 'error> {
+    tokens: &'tokens Tokens<'tokens>,
+    pub(crate) error_handler: &'error mut dyn ErrorHandler,
+    token_index: usize,
 }
 
-pub struct Parser {
-    pub map: TokenMap,
+pub trait Parse: Sized {
+    fn parse(parser: &mut Parser) -> Option<Self>;
 }
 
-impl Parser {
-    pub fn new(map: TokenMap) -> Self {
-        Self { map }
-    }
-
-    pub fn parse(&self) -> Tree {
-        let mut functions = Vec::new();
-        let tree = self.map.tree.tree().unwrap();
-        let children = &tree.children;
-        let mut cursor = Cursor::new(children);
-        while let Some(tree) = cursor.peek() {
-            match tree {
-                TokenTree::Tree(tree) => panic!("Unexpected {} at top-level!", tree.kind),
-                _ => {
-                    functions.push(self.parse_function(&mut cursor));
-                }
-            }
-        }
-        Tree {
-            functions,
-            any_errors: false,
+impl<'tokens, 'error> Parser<'tokens, 'error> {
+    /// Create a new `Parser` from the given `Tokens` and with the given `ErrorHandler`.
+    pub fn new(
+        tokens: &'tokens Tokens<'tokens>,
+        error_handler: &'error mut dyn ErrorHandler,
+    ) -> Self {
+        Self {
+            tokens,
+            error_handler,
+            token_index: 0,
         }
     }
-}
 
-pub struct Cursor<'a> {
-    trees: Vec<&'a TokenTree>,
-    index: usize,
-}
-
-impl<'a> Cursor<'a> {
-    pub fn new(trees: &'a Vec<TokenTree>) -> Self {
-        let trees = trees
-            .iter()
-            .filter(|tree| !tree.is_comment_or_whitespace())
-            .collect();
-        Self { trees, index: 0 }
+    /// Parse the entire `ast::Tree`
+    pub fn parse(&mut self) -> Tree {
+        self.parse_one().unwrap()
     }
 
-    pub fn peek(&self) -> Option<&'a TokenTree> {
-        self.trees.get(self.index).map(|tree| *tree)
+    /// Parse a single instance of a given `T`.
+    pub fn parse_one<T: Parse>(&mut self) -> Option<T> {
+        <T as Parse>::parse(self)
     }
 
+    /// Return the token at the current `token_index`
+    pub fn peek(&self) -> Option<Token<'tokens>> {
+        self.tokens.get(self.token_index).cloned()
+    }
+
+    /// Returns if the parser has consumed all tokens.
+    pub fn eof(&self) -> bool {
+        self.peek().is_none()
+    }
+
+    /// Unconditionally advance to the next token.
     pub fn advance(&mut self) {
-        self.index += 1;
-    }
-}
-
-impl<'a> Cursor<'a> {
-    pub fn expect_token(&mut self, kind: TokenKind) -> &'a Token {
-        self.maybe_token(kind).unwrap()
+        self.token_index += 1;
     }
 
-    pub fn maybe_token(&mut self, kind: TokenKind) -> Option<&'a Token> {
-        let token = self.peek_token()?;
-        if token.kind != kind {
-            return None;
+    /// Check the next token. If it is `kind`, then consume and return it. Otherwise, return
+    /// `None`.
+    pub fn maybe(&mut self, kind: TokenKind) -> Option<Token<'tokens>> {
+        self.peek()
+            .filter(|token| token.kind() == kind)
+            .map(|token| {
+                self.advance();
+                token
+            })
+    }
+
+    /// Check the next token. If it is `kind`, then consume and return it. Otherwise, issue an
+    /// error diagnostic and return `None`.
+    pub fn expect(&mut self, kind: TokenKind) -> Option<Token<'tokens>> {
+        self.maybe(kind).or_else(|| {
+            let token = self.peek();
+            let advance = token.is_some();
+            let error = ExpectedError::new(kind, token);
+            self.issue_diagnostic(format!("{}", error));
+            if advance {
+                self.advance();
+            }
+            None
+        })
+    }
+
+    /// Try to perform `action` on `self`, returning an `Option<T>`. If the value returned by
+    /// `action` is `None`, backtrack to before `action` was performed.
+    pub fn some_or_backtrack<T>(
+        &mut self,
+        action: impl FnOnce(&mut Self) -> Option<T>,
+    ) -> Option<T> {
+        let before = self.token_index;
+        action(self).or_else(|| {
+            self.token_index = before;
+            None
+        })
+    }
+
+    /// `advance` while `predicate` is satisfied for the current token.
+    pub fn advance_while(&mut self, predicate: impl Fn(&Token) -> bool) {
+        while let Some(token) = self.peek() {
+            if !predicate(&token) {
+                break;
+            }
+            self.advance();
         }
+    }
+
+    /// `advance` until the current token is `kind`
+    pub fn advance_until(&mut self, kind: TokenKind) {
+        self.advance_until_one_of(&[kind]);
+    }
+
+    /// `advance` until the current token's kind is one of `kinds`.
+    pub fn advance_until_one_of(&mut self, kinds: &[TokenKind]) {
+        self.advance_while(|token| !kinds.contains(&token.kind()));
+    }
+
+    /// `advance` until the current token's kind is one of `kinds`, and then `advance` past it.
+    pub fn advance_past_one_of(&mut self, kinds: &[TokenKind]) {
+        self.advance_until_one_of(kinds);
         self.advance();
-        Some(token)
     }
 
-    pub fn peek_token(&self) -> Option<&'a Token> {
-        self.peek().and_then(TokenTree::token)
-    }
-}
-
-impl<'a> Cursor<'a> {
-    pub fn expect_tree(&mut self, kind: TreeKind) -> &'a SubTree {
-        self.maybe_tree(kind).unwrap()
-    }
-
-    pub fn maybe_tree(&mut self, kind: TreeKind) -> Option<&'a SubTree> {
-        let tree = self.peek_tree()?;
-        if tree.kind != kind {
-            return None;
-        }
-        self.advance();
-        Some(tree)
-    }
-
-    pub fn peek_tree(&mut self) -> Option<&'a SubTree> {
-        self.peek().and_then(TokenTree::tree)
-    }
-}
-
-impl<'a> Iterator for Cursor<'a> {
-    type Item = &'a TokenTree;
-    fn next(&mut self) -> Option<Self::Item> {
-        let tree = self.peek()?;
-        self.advance();
-        Some(tree)
-    }
-}
-
-impl itertools::PeekingNext for Cursor<'_> {
-    fn peeking_next<F>(&mut self, accept: F) -> Option<Self::Item>
-    where
-        F: FnOnce(&Self::Item) -> bool,
-    {
-        let next = self.peek()?;
-        if accept(&next) {
-            self.next();
-            return Some(next);
-        }
-        return None;
+    /// `advance` until the current token's kind is one of `kinds`, and then `advance` past it.
+    pub fn advance_past(&mut self, kind: TokenKind) {
+        self.advance_past_one_of(&[kind]);
     }
 }
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use crate::ast::{Parameter, Scope, Statement, Type, TypeKind, Variable};
+    use crate::ast::*;
+    use crate::lexer::TokenKind;
 
-    fn parse(source: &'static str) -> Tree {
-        super::parse(crate::lexer::test::lex(source))
+    struct DummyHandler;
+
+    fn leak<'a, T>(t: T) -> &'a mut T {
+        Box::leak(Box::new(t))
     }
 
-    fn tree(functions: &[Function]) -> Tree {
-        Tree {
-            functions: functions.to_vec(),
-            any_errors: false,
+    impl ErrorHandler for DummyHandler {
+        fn issue_diagnostic(&mut self, _error: &Error) {}
+    }
+
+    impl<'error> Parser<'_, 'error> {
+        fn test_with_source_and_handler(
+            source: &Source,
+            error_handler: &'error mut dyn ErrorHandler,
+        ) -> Self {
+            let map = leak(crate::lexer::lex(source));
+            let tokens = leak(map.tokens().strip_comments_and_whitespace());
+            Self::new(tokens, error_handler)
+        }
+
+        pub fn test(text: &str) -> Self {
+            let source = leak(crate::util::SourceBuilder::new().source(text).build());
+            Self::test_with_source_and_handler(source, leak(DummyHandler))
+        }
+
+        pub fn test_with_log(text: &str, log: &'error mut dyn std::io::Write) -> Self {
+            let source = leak(crate::util::SourceBuilder::new().source(text).build());
+            let handler = leak(StreamHandler::new(source, log));
+            Self::test_with_source_and_handler(source, handler)
+        }
+
+        fn peek_repr(&self) -> String {
+            self.peek().unwrap().repr()
         }
     }
 
-    fn function(
-        name: &str,
-        parameters: &[Parameter],
-        return_type: Type,
-        statements: Option<&[Statement]>,
-    ) -> Function {
-        let body = statements.map(|s| Scope {
-            statements: s.to_vec(),
+    #[test]
+    fn peek_none() {
+        let parser = Parser::test("");
+        assert!(parser.eof());
+    }
+
+    #[test]
+    fn peek_one() {
+        let parser = Parser::test("1");
+        assert_eq!(parser.peek_repr(), "1");
+    }
+
+    #[test]
+    fn advance_until_normal() {
+        let mut parser = Parser::test("let n: 10 = 20;");
+        parser.advance_until(TokenKind::SemiColon);
+        assert_eq!(parser.peek_repr(), ";");
+        assert_eq!(parser.token_index, 6);
+    }
+
+    #[test]
+    fn advance_until_do_nothing() {
+        let mut parser = Parser::test("let m = *");
+        let before = parser.token_index;
+        parser.advance_until(TokenKind::Let);
+        let after = parser.token_index;
+        assert_eq!(parser.peek_repr(), "let");
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn advance_past_current() {
+        let mut parser = Parser::test("this 10");
+        parser.advance_past(TokenKind::Identifier);
+        assert_eq!(parser.peek_repr(), "10");
+    }
+
+    #[test]
+    fn advance_past_later() {
+        let mut parser = Parser::test("this = 10 + ; wow");
+        parser.advance_past(TokenKind::SemiColon);
+        assert_eq!(parser.peek_repr(), "wow");
+    }
+
+    #[test]
+    fn advance_past_none() {
+        let mut parser = Parser::test("blue 42");
+        parser.advance_past(TokenKind::Let);
+        assert!(parser.eof());
+    }
+
+    #[test]
+    fn maybe_none() {
+        let mut parser = Parser::test("if");
+        let before = parser.token_index;
+        let result = parser.maybe(TokenKind::Let);
+        let after = parser.token_index;
+        assert!(result.is_none());
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn maybe_some() {
+        let mut parser = Parser::test("10 &&");
+        let repr = parser.maybe(TokenKind::Number).unwrap().repr();
+        assert_eq!(repr, "10");
+        assert_eq!(parser.peek_repr(), "&&");
+    }
+
+    #[test]
+    fn maybe_eof() {
+        let mut parser = Parser::test("");
+        assert!(parser.eof());
+        let result = parser.maybe(TokenKind::Identifier);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn some_or_backtrack_some() {
+        let mut parser = Parser::test("10 + 20");
+        let (first, plus, second) = parser
+            .some_or_backtrack(|parser| {
+                let first = parser.maybe(TokenKind::Number)?;
+                let plus = parser.maybe(TokenKind::Plus)?;
+                let second = parser.maybe(TokenKind::Number)?;
+                Some((first, plus, second))
+            })
+            .unwrap();
+        assert_eq!(first.repr(), "10");
+        assert_eq!(plus.repr(), "+");
+        assert_eq!(second.repr(), "20");
+        assert!(parser.eof());
+    }
+
+    #[test]
+    fn some_or_backtrack_none() {
+        let mut parser = Parser::test("meow + 20");
+        let before = parser.token_index;
+        let result = parser.some_or_backtrack(|parser| {
+            let first = parser.maybe(TokenKind::Identifier)?;
+            let plus = parser.maybe(TokenKind::Plus)?;
+            let second = parser.maybe(TokenKind::Identifier)?;
+            Some((first, plus, second))
         });
-        Function {
-            identifier: name.to_string(),
-            parameters: parameters.to_vec(),
-            body,
-            return_type,
-        }
-    }
-
-    fn param(name: &str, type_: &str) -> Parameter {
-        let type_ = ty(type_);
-        let variable = var(name);
-        Parameter { type_, variable }
-    }
-
-    fn ty(ty: &str) -> Type {
-        use std::convert::TryFrom;
-        let kind = TypeKind::try_from(ty).unwrap();
-        Type { kind }
-    }
-
-    fn var(name: &str) -> Variable {
-        let identifier = name.to_string();
-        Variable { identifier }
-    }
-
-    #[test]
-    fn empty() {
-        assert_eq!(parse(""), tree(&[]))
-    }
-
-    #[test]
-    fn empty_function() {
-        assert_eq!(
-            parse(
-                "fn a(foo: i64, bar: i64) -> i32 {}\n\
-                 fn a() -> i32 {}"
-            ),
-            tree(&[
-                function(
-                    "a",
-                    &[param("foo", "i64"), param("bar", "i64")],
-                    ty("i32"),
-                    Some(&[]),
-                ),
-                function("a", &[], ty("i32"), Some(&[]))
-            ])
-        );
-    }
-
-    #[test]
-    fn function_declaration() {
-        assert_eq!(
-            parse("fn a(foo: i64, bar: i64) -> i8;"),
-            tree(&[function(
-                "a",
-                &[param("foo", "i64"), param("bar", "i64")],
-                ty("i8"),
-                None,
-            )])
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "Unexpected braces at top-level!")]
-    fn top_level_block() {
-        parse("{}");
+        let after = parser.token_index;
+        assert!(result.is_none());
+        assert_eq!(before, after);
     }
 }

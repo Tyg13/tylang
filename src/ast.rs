@@ -1,57 +1,74 @@
 use crate::lexer::TokenMap;
-use crate::util::{ArmPosition, Source};
-use std::rc::Rc;
+use crate::util::Source;
 
 mod constant;
 mod error;
 mod expression;
 mod function;
+mod item;
 pub mod parser;
+mod scope;
 mod statement;
+mod tree;
 mod r#type;
 mod variable;
-pub mod visit;
+mod visit;
 pub use constant::*;
 use error::*;
 pub use expression::*;
 pub use function::*;
+pub use item::*;
 pub use parser::*;
 pub use r#type::*;
+pub use scope::*;
 pub use statement::*;
+pub use tree::*;
 pub use variable::*;
-pub use visit::Visitor;
+pub use visit::*;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Scope {
-    pub statements: Vec<Statement>,
-}
-
-impl std::fmt::Display for Scope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner: Vec<String> = self
-            .statements
-            .iter()
-            .map(|statement| statement.kind.to_string())
-            .collect();
-        write!(f, "[{}]", inner.join(","))
-    }
-}
+// Ast rough sketch (future, not as currently implemented)
+//
+// Tree ::== [Function]*
+// Function ::= "fn" Ident "(" [Param ","?]* ")" ["->" Type]? [Scope / ";"]
+// Param ::= Ident ":" Type
+// Expr ::= Scope / Group / Binary / Return
+// Scope ::= "{" [Statement ";"]* [Expr]? "}"
+// Statement ::= Decl / Expr
+// Decl ::= "let" Ident [":" Type]? ["=" Expr]?
+// Group ::= "(" Expr ")"
+// Binary ::= Expr BinOp Expr
+// Return ::= "return" Expr
 
 pub fn parse(source: &Source, map: TokenMap, out: &mut dyn std::io::Write) -> Tree {
     log::debug!("Parsing {}", source.file());
-    Parser::new(map).parse()
+    Parser::new(
+        &map.tokens().strip_comments_and_whitespace(),
+        &mut StreamHandler::new(source, out),
+    )
+    .parse()
 }
 
-type Result<T> = std::result::Result<T, Error>;
+#[cfg(test)]
+pub mod test {
+    use crate::ast::parser::{Parse, Parser};
+    use crate::ast::Tree;
+    use crate::util::SourceBuilder;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Tree {
-    pub functions: Vec<Function>,
-    any_errors: bool,
-}
+    pub use crate::ast::expression::test::*;
+    pub use crate::ast::function::test::*;
+    pub use crate::ast::item::test::*;
+    pub use crate::ast::r#type::test::*;
+    pub use crate::ast::statement::test::*;
+    pub use crate::ast::tree::test::*;
+    pub use crate::ast::variable::test::*;
 
-impl Tree {
-    pub fn valid(&self) -> bool {
-        !self.any_errors
+    pub fn parse(source: &'static str) -> Tree {
+        let source = SourceBuilder::new().source(source).build();
+        let mut out = Vec::new();
+        super::parse(&source, crate::lexer::lex(&source), &mut out)
+    }
+
+    pub fn parse_one<T: Parse>(source: &'static str) -> T {
+        Parser::test(source).parse_one().unwrap()
     }
 }

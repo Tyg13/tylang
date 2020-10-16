@@ -4,10 +4,13 @@ use clap::{clap_app, AppSettings};
 use std::fs;
 
 mod ast;
+mod bir;
 mod compiler;
 mod lexer;
-mod type_check;
+//mod typeck;
 mod util;
+
+//mod pika;
 
 use util::SourceBuilder;
 
@@ -39,15 +42,26 @@ fn main() -> Result<(), Error> {
     }
     let source = SourceBuilder::new().file(input_path).source(input).build();
     let tokens = lexer::lex(&source);
-    let tree = ast::parse(&source, tokens, &mut std::io::stdout());
-    if tree.valid() {
-        let action = match matches.value_of("ACTION") {
-            None | Some("compile") => compiler::Action::WriteObject,
-            Some("ir") => compiler::Action::WriteIr,
-            Some("asm") => compiler::Action::WriteAssembly,
-            Some(action) => return Err(Error::UnknownAction(action.to_string())),
-        };
-        compiler::compile(&tree, &source, action);
+    match matches.value_of("ACTION") {
+        Some("print") => return Ok(pretty_print(&tokens)),
+        _ => {
+            let tree = ast::parse(&source, tokens, &mut std::io::stdout());
+            if tree.valid() {
+                let action = match matches.value_of("ACTION") {
+                    None | Some("compile") => compiler::Action::WriteObject,
+                    Some("ir") => compiler::Action::WriteIr,
+                    Some("asm") => compiler::Action::WriteAssembly,
+                    Some(action) => return Err(Error::UnknownAction(action.to_string())),
+                };
+                compiler::compile(&tree, &source, action);
+            }
+        }
     }
     Ok(())
+}
+
+fn pretty_print(map: &lexer::TokenMap) {
+    for token in map.tokens() {
+        print!("{}", token);
+    }
 }

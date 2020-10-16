@@ -20,14 +20,21 @@ impl From<Variable> for Expression {
     }
 }
 
-impl Parser {
-    pub(super) fn parse_variable(&self, cursor: &mut Cursor) -> Option<Variable> {
-        let token = cursor.expect_token(TokenKind::Identifier);
-        let identifier = self
-            .map
-            .ident(&token)
-            .cloned()
-            .expect("Couldn't get ident for variable!");
+impl Parse for Variable {
+    fn parse(parser: &mut Parser) -> Option<Self> {
+        let identifier = parser
+            .expect(TokenKind::Identifier)
+            .map(|token| token.as_ident().unwrap())?;
         Some(Variable { identifier })
+    }
+}
+
+#[cfg(test)]
+pub mod test {
+    use crate::ast::*;
+
+    pub fn var(name: &str) -> Variable {
+        let identifier = name.to_string();
+        Variable { identifier }
     }
 }

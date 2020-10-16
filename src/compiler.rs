@@ -147,7 +147,8 @@ impl<'ctx> Compiler<'ctx> {
                 })
             }
             Call { name, arguments } => {
-                let values: Vec<_> = arguments.iter().map(|arg| self.expr_value(arg)).collect();
+                let arg_val = |arg| self.expr_value(arg);
+                let values: Vec<_> = arguments.iter().map(arg_val).collect();
                 let func = self.module.get_function(&name).expect("No such function");
                 self.builder
                     .build_call(func, &values, "call")
@@ -160,6 +161,7 @@ impl<'ctx> Compiler<'ctx> {
             }
             Variable(var) => self.var_value(&var.identifier),
             Group(inner) => self.expr_value(inner),
+            Error => unreachable!(),
         }
     }
 
@@ -231,6 +233,7 @@ impl<'ctx> Compiler<'ctx> {
                 let pointed_to_type = self.type_(&type_);
                 pointed_to_type.ptr_type(AddressSpace::Generic)
             }),
+            Error => unreachable!(),
         }
     }
 
@@ -250,7 +253,6 @@ impl<'ctx> Compiler<'ctx> {
     }
 }
 
-use ast::visit;
 impl ast::Visitor for Compiler<'_> {
     fn visit_function(&mut self, function: &ast::Function) {
         let param_types: Vec<_> = function
@@ -291,19 +293,19 @@ impl ast::Visitor for Compiler<'_> {
 
     fn visit_scope(&mut self, scope: &ast::Scope) {
         self.scope_stack.push(Scope::new());
-        visit::walk_scope(self, scope);
+        ast::walk_scope(self, scope);
         self.scope_stack.pop();
     }
 
     fn visit_statement(&mut self, stmt: &ast::Statement) {
-        use ast::StatementKind::*;
+        use ast::StatementKind;
         match &stmt.kind {
-            Declaration {
+            StatementKind::Declaration(ast::Declaration {
                 var,
                 type_,
                 initializer,
-            } => {
-                let var_type = self.type_(type_);
+            }) => {
+                let var_type = self.type_(type_.as_ref().unwrap());
                 let addr = self.builder.build_alloca(var_type, &var.identifier);
                 let initial_value = match initializer {
                     Some(initializer) => self.expr_value(initializer),
@@ -314,7 +316,7 @@ impl ast::Visitor for Compiler<'_> {
                     .variables
                     .insert(var.identifier.clone(), Variable::new(addr));
             }
-            Assignment { dst, src } => {
+            StatementKind::Assignment { dst, src } => {
                 use ast::ExpressionKind::*;
                 let addr = match &dst.kind {
                     Variable(var) => self.var_address(&var.identifier),
@@ -323,12 +325,12 @@ impl ast::Visitor for Compiler<'_> {
                 let value = self.expr_value(src);
                 self.builder.build_store(addr, value);
             }
-            Scope(scope) => self.visit_scope(scope),
-            Return(expr) => {
+            StatementKind::Scope(scope) => self.visit_scope(scope),
+            StatementKind::Return(expr) => {
                 let val = self.expr_value(expr);
                 self.builder.build_return(Some(&val));
             }
-            If { condition, block } => {
+            StatementKind::If { condition, block } => {
                 let cond_value = self.expr_value(condition).into_int_value();
                 let cond =
                     self.builder

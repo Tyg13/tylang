@@ -1,6 +1,6 @@
 pub mod intern_map;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct Anchor {
     pub line: usize,
     pub column: usize,
@@ -20,28 +20,6 @@ impl std::ops::Add<usize> for Anchor {
 pub struct Span {
     pub start: Anchor,
     pub end: Anchor,
-}
-
-#[macro_export]
-macro_rules! span {
-    ($start_line:expr;$start_column:expr, $end_line:expr;$end_column:literal) => {
-        $crate::util::Span {
-            start: $crate::util::Anchor {
-                line: $start_line,
-                column: $start_column,
-            },
-            end: $crate::util::Anchor {
-                line: $end_line,
-                column: $end_column,
-            },
-        }
-    };
-    ($start:expr, $end:expr) => {
-        $crate::util::Span {
-            start: $start.span.start,
-            end: $end.span.end,
-        }
-    };
 }
 
 use std::fmt;
@@ -89,7 +67,7 @@ impl SourceBuilder {
             .file
             .map(|s| if s == "-" { String::from("<stdin>") } else { s })
             .unwrap_or(String::from("<err>"));
-        let chars: Vec<char> = self.source.unwrap_or(String::new()).chars().collect();
+        let chars: Vec<char> = self.source.unwrap_or_default().chars().collect();
         let line_ends = chars
             .iter()
             .enumerate()
@@ -104,9 +82,10 @@ impl SourceBuilder {
     }
 }
 
-pub enum ArmPosition {
-    Begin,
-    End,
+pub enum HandPosition {
+    BeginOfSpan,
+    WholeSpan,
+    EndOfSpan,
 }
 
 impl Source {
@@ -115,12 +94,9 @@ impl Source {
     }
 
     pub fn line(&self, number: usize) -> Option<String> {
-        if number == 0 {
-            return None;
-        }
-        let index = number - 1;
-        // Start this line at the previous EOL. If we're on the first line,
-        // there is no previous line. Use the beginning of the file instead.
+        let index = number.checked_sub(1)?;
+        // Start this line at one past the previous EOL. If we're on the first line,
+        // there is no previous line; use the beginning of the file instead.
         let begin = match index.checked_sub(1) {
             Some(prev) => *self.line_ends.get(prev)? + 1,
             None => 0,
@@ -134,33 +110,38 @@ impl Source {
         Some(line)
     }
 
-    pub fn file(&self) -> String {
-        self.file.clone()
+    pub fn file(&self) -> &str {
+        &self.file
     }
 
-    pub fn give_context(&self, span: Span, arm: ArmPosition) -> Option<String> {
-        const PADDING_LEN: usize = 4;
-        let context = self.line(span.end.line)?;
+    pub fn give_context_at(&self, at: Anchor) -> Option<String> {
+        self.give_context_span(Span { start: at, end: at }, HandPosition::BeginOfSpan)
+    }
+
+    pub fn give_context_span(&self, span: Span, arm: HandPosition) -> Option<String> {
+        use HandPosition::*;
+        let pos = match arm {
+            BeginOfSpan | WholeSpan => span.start,
+            EndOfSpan => span.end,
+        };
         let prefix = format!(
-            "[{file}:{line}:{column}]{padding}",
+            "[{file}:{line}:{column}] | ",
             file = self.file,
-            line = span.start.line,
-            column = span.start.column,
-            padding = str::repeat(" ", PADDING_LEN)
+            line = pos.line,
+            column = pos.column,
         );
-        let column = match arm {
-            ArmPosition::Begin => span.start.column,
-            ArmPosition::End => span.end.column,
+        let context = self.line(pos.line)?;
+        let (start, end) = match arm {
+            BeginOfSpan => (span.start.column, span.start.column),
+            WholeSpan => (span.start.column, span.end.column),
+            EndOfSpan => (span.end.column, span.end.column),
         };
         Some(format!(
             "{prefix}{context}\n{arm}{hand}",
             prefix = prefix,
             context = context,
-            arm = str::repeat("-", prefix.len() + column - 1),
-            hand = str::repeat(
-                "^",
-                std::cmp::max(1, span.end.column.saturating_sub(column))
-            ),
+            arm = str::repeat("-", prefix.len() + start - 1),
+            hand = str::repeat("^", std::cmp::max(1, end.saturating_sub(start))),
         ))
     }
 }

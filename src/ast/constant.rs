@@ -1,4 +1,4 @@
-use super::*;
+use crate::ast::{Expression, ExpressionKind, Parse, Parser};
 use crate::lexer::TokenKind;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -19,6 +19,15 @@ impl std::fmt::Display for Constant {
     }
 }
 
+impl Constant {
+    pub(super) fn new<P: Into<Parity>>(value: usize, parity: P) -> Self {
+        Self {
+            value,
+            parity: parity.into(),
+        }
+    }
+}
+
 impl From<Constant> for Expression {
     fn from(cons: Constant) -> Self {
         Self {
@@ -36,23 +45,40 @@ impl From<crate::lexer::Parity> for Parity {
     }
 }
 
-impl Parser {
-    pub(super) fn parse_constant(&self, cursor: &mut Cursor) -> Option<Constant> {
-        let token = cursor.expect_token(TokenKind::Number);
-        let number = self.map.num(&token)?;
-        Some(Constant {
-            value: number.value,
-            parity: number.parity.into(),
-        })
+impl Parse for Constant {
+    fn parse(parser: &mut Parser) -> Option<Self> {
+        let number = parser
+            .expect(TokenKind::Number)
+            .map(|token| token.as_num().unwrap())?;
+        Some(Constant::new(number.value, number.parity))
     }
 }
 
-#[cfg(tests)]
-mod tests {
-    #[macro_export]
-    macro_rules! con {
-        ($span:expr, $value:expr) => {
-            $crate::ast::Constant { value: $value }
-        };
+#[cfg(test)]
+mod test {
+    use crate::ast::*;
+
+    fn unsigned(value: usize) -> Constant {
+        Constant {
+            value,
+            parity: Parity::Unsigned,
+        }
+    }
+
+    fn signed(value: usize) -> Constant {
+        Constant {
+            value,
+            parity: Parity::Signed,
+        }
+    }
+
+    #[test]
+    fn unsigned_num() {
+        assert_eq!(unsigned(10), test::parse_one("10"));
+    }
+
+    #[test]
+    fn signed_num() {
+        assert_eq!(signed(10), test::parse_one("-10"));
     }
 }
