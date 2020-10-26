@@ -220,14 +220,14 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     fn type_(&self, type_: &ast::Type) -> BasicTypeEnum<'ctx> {
-        use ast::Builtin::*;
         use ast::TypeKind::*;
         match &type_.kind {
-            Builtin(kind) => BasicTypeEnum::from(match kind {
-                I8 => self.context.i8_type(),
-                I16 => self.context.i16_type(),
-                I32 => self.context.i32_type(),
-                I64 => self.context.i64_type(),
+            Type(name) => BasicTypeEnum::from(match name.as_str() {
+                "i8" => self.context.i8_type(),
+                "i16" => self.context.i16_type(),
+                "i32" => self.context.i32_type(),
+                "i64" => self.context.i64_type(),
+                _ => panic!("unknown type {}", name),
             }),
             Pointer(type_) => BasicTypeEnum::from({
                 let pointed_to_type = self.type_(&type_);
