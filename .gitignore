@@ -1,6 +1,9 @@
 /target
-*.swp*
-*.swo*
+
+*.log
 *.o
 *.s
-*.ir
+*.swo*
+*.swp*
+
+.nvimrc

@@ -1,0 +1,6 @@
+fn add(a: i64, b: i64, c: i64) -> u64 {
+
+    let c: u64 = a + b;
+    return add(a, b, 3);
+}
+

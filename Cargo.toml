@@ -1,21 +1,11 @@
-[package]
-name = "tylang"
-version = "0.1.0"
-authors = ["Tyler Lanphear <animemachine13@gmail.com>"]
-edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
-itertools = "0.9.0"
-clap = "2.33.0"
-inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm10-0"] }
-log = "0.4.8"
-env_logger = "0.7.1"
-bimap = "0.4.0"
-salsa = "0.14"
-indexmap = "1.6.0"
-thiserror = "1.0.20"
-
-[dev-dependencies]
-pretty_assertions= "0.6.1"
+[workspace]
+members = [
+    "crates/ast",
+    "crates/bir",
+    "crates/cst",
+    "crates/lir",
+    "crates/tyc",
+    # "crates/tyls", (for now)
+    "crates/typeck",
+    "crates/utils",
+]
