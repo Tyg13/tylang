@@ -25,6 +25,7 @@ pub enum SyntaxKind {
     IDENT,
     NUMBER,
     WHITESPACE,
+    COMMENT,
     STRING,
 
     LEFT_PAREN,
@@ -49,11 +50,11 @@ pub enum SyntaxKind {
     DOT,
 
     AMPERSAND_AMPERSAND,
+    BAR_BAR,
     LEFT_ANGLE_EQUALS,
     RIGHT_ANGLE_EQUALS,
     EQUALS_EQUALS,
     DASH_ARROW,
-    BAR_BAR,
 
     DOT_DOT_DOT,
 
@@ -68,6 +69,9 @@ pub enum SyntaxKind {
     INDEX_EXPR,
     IF_EXPR,
     LOOP_EXPR,
+    WHILE_EXPR,
+    BREAK_EXPR,
+    CONTINUE_EXPR,
 
     TYPE_KW,
     FN_KW,
@@ -76,7 +80,9 @@ pub enum SyntaxKind {
     IF_KW,
     ELSE_KW,
     LOOP_KW,
+    WHILE_KW,
     BREAK_KW,
+    CONTINUE_KW,
 }
 use SyntaxKind::*;
 
@@ -99,7 +105,7 @@ impl Subtokens {
 impl SyntaxKind {
     pub fn is_trivia(&self) -> bool {
         match self {
-            WHITESPACE => true,
+            WHITESPACE | COMMENT => true,
             _ => false,
         }
     }
@@ -118,9 +124,26 @@ impl SyntaxKind {
     pub fn terminated_by_semicolon(&self) -> bool {
         match *self {
             LITERAL | NAME_REF | PREFIX_EXPR | BIN_EXPR | PAREN_EXPR | BLOCK_EXPR | RETURN_EXPR
-            | CALL_EXPR => true,
-            IF_EXPR | LOOP_EXPR => false,
+            | INDEX_EXPR | CALL_EXPR | BREAK_EXPR | CONTINUE_EXPR => true,
+            IF_EXPR | LOOP_EXPR | WHILE_EXPR => false,
             _ => unreachable!(),
+        }
+    }
+
+    pub fn is_operator(&self) -> bool {
+        match *self {
+            LEFT_ANGLE | RIGHT_ANGLE | AMPERSAND | EQUALS | BAR | DASH | PLUS | STAR | SLASH
+            | DOT | AMPERSAND_AMPERSAND | BAR_BAR | LEFT_ANGLE_EQUALS | RIGHT_ANGLE_EQUALS
+            | EQUALS_EQUALS | DASH_ARROW | DOT_DOT_DOT => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_keyword(&self) -> bool {
+        match *self {
+            TYPE_KW | FN_KW | LET_KW | RETURN_KW | IF_KW | ELSE_KW | LOOP_KW | WHILE_KW
+            | BREAK_KW | CONTINUE_KW => true,
+            _ => false,
         }
     }
 }
@@ -225,5 +248,14 @@ macro_rules! T {
     };
     (loop) => {
         crate::SyntaxKind::LOOP_KW
+    };
+    (while) => {
+        crate::SyntaxKind::WHILE_KW
+    };
+    (break) => {
+        crate::SyntaxKind::BREAK_KW
+    };
+    (continue) => {
+        crate::SyntaxKind::CONTINUE_KW
     };
 }

@@ -2,10 +2,13 @@
 members = [
     "crates/ast",
     "crates/bir",
+    "crates/sema",
     "crates/cst",
     "crates/lir",
     "crates/tyc",
-    # "crates/tyls", (for now)
-    "crates/typeck",
+    "crates/tyls",
     "crates/utils",
 ]
+
+[profile.release]
+debug = true

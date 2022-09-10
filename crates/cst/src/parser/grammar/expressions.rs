@@ -43,6 +43,9 @@ fn expr_lhs(parser: &mut Parser) -> Option<CompletedMarker> {
         IDENT => name_ref(parser),
         T![if] => if_expr(parser),
         T![loop] => loop_expr(parser),
+        T![while] => while_expr(parser),
+        T![break] => break_expr(parser),
+        T![continue] => continue_expr(parser),
         T!['('] => paren(parser),
         T!['{'] => block(parser),
         T![return] => return_(parser),
@@ -96,44 +99,75 @@ fn loop_expr(parser: &mut Parser<'_>) -> CompletedMarker {
     })
 }
 
+fn while_expr(parser: &mut Parser<'_>) -> CompletedMarker {
+    parser.node(WHILE_EXPR, |parser| {
+        parser.expect_token(T![while]);
+        expr(parser);
+        block(parser);
+    })
+}
+
+fn break_expr(parser: &mut Parser<'_>) -> CompletedMarker {
+    parser.node(BREAK_EXPR, |parser| {
+        parser.expect_token(T![break]);
+        expr(parser);
+    })
+}
+
+fn continue_expr(parser: &mut Parser<'_>) -> CompletedMarker {
+    parser.node(CONTINUE_EXPR, |parser| {
+        parser.expect_token(T![continue]);
+    })
+}
+
 pub(super) fn block(parser: &mut Parser<'_>) -> CompletedMarker {
     parser.node(BLOCK_EXPR, |parser| {
         parser.expect_token(T!['{']);
-        parser.with_follow_set(&[T!['}']], |parser| {
-            block_inner(parser);
-        });
+        block_inner(parser);
         parser.expect_token(T!['}']);
     })
 }
 
 pub(super) fn block_inner(parser: &mut Parser<'_>) {
+    fn finish_previous_expr(
+        parser: &mut Parser<'_>,
+        previous_expr: Option<CompletedMarker>,
+        next: Option<SyntaxKind>,
+    ) {
+        if let Some(ref previous) = previous_expr {
+            if previous.kind().terminated_by_semicolon() && parser.maybe(T![;]) {
+                let stmt = previous.precede(parser);
+                parser.expect_token(T![;]);
+                stmt.complete(parser, EXPR_ITEM);
+            } else if next.map(|kind| !parser.maybe(kind)).unwrap_or(true) {
+                let stmt = previous.precede(parser);
+                stmt.complete(parser, EXPR_ITEM);
+            }
+        }
+    }
+
     let mut previous_expr: Option<CompletedMarker> = None;
     loop {
         match parser.advance_to_next_non_trivia() {
-            T![let] => items::let_item(parser),
-            T![fn] => items::fn_item(parser),
-            EOF => parser.unexpected(EOF),
-            _ => {
-                if let Some(ref previous) = previous_expr {
-                    if previous.kind().terminated_by_semicolon() {
-                        if parser.maybe(T![;]) {
-                            let stmt = previous.precede(parser);
-                            parser.expect_token(T![;]);
-                            stmt.complete(parser, EXPR_ITEM);
-                        }
-                    } else if !parser.maybe(T!['}']) {
-                        let stmt = previous.precede(parser);
-                        stmt.complete(parser, EXPR_ITEM);
-                    }
-                }
-
-                let next = expr(parser);
-
-                if let Some(expr) = next {
-                    previous_expr = Some(expr);
-                    continue;
-                }
+            T![let] => {
+                finish_previous_expr(parser, previous_expr, None);
+                items::let_item(parser);
+                previous_expr = None;
+            }
+            T![fn] => {
+                finish_previous_expr(parser, previous_expr, None);
+                items::fn_item(parser);
+                previous_expr = None;
+            }
+            EOF => {
+                parser.unexpected(EOF);
                 break;
+            }
+            T!['}'] => break,
+            _ => {
+                finish_previous_expr(parser, previous_expr, Some(T!['}']));
+                let next = expr(parser);
+                previous_expr = next;
             }
         }
     }

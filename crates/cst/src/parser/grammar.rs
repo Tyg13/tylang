@@ -7,6 +7,7 @@ mod items;
 
 pub enum EntryPoint {
     Module,
+    Block,
     Expression,
 }
 
@@ -15,6 +16,9 @@ pub(super) fn entry_point(parser: &mut Parser<'_>, entry: EntryPoint) {
         EntryPoint::Module => {
             module(parser);
         }
+        EntryPoint::Block => {
+            expressions::block(parser);
+        }
         EntryPoint::Expression => {
             expressions::expr(parser);
         }
@@ -22,17 +26,17 @@ pub(super) fn entry_point(parser: &mut Parser<'_>, entry: EntryPoint) {
 }
 
 fn module(parser: &mut Parser<'_>) {
-    parser.node(MODULE, |parser| {
-        loop {
-            match parser.advance_to_next_non_trivia() {
-                T![let] => items::let_item(parser),
-                T![fn] => items::fn_item(parser),
-                T![type] => items::type_item(parser),
-                EOF => break,
-                _ => items::expr_item(parser),
-            }
+    let m = parser.start_node();
+    loop {
+        match parser.advance_to_next_non_trivia() {
+            T![let] => items::let_item(parser),
+            T![fn] => items::fn_item(parser),
+            T![type] => items::type_item(parser),
+            EOF => break,
+            _ => items::expr_item(parser),
         }
-    });
+    }
+    m.complete(parser, MODULE);
 }
 
 // TODO: are there usages of name that are unnecessary (why can't we just use IDENT?)

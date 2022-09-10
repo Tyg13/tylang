@@ -45,8 +45,7 @@ impl<'source> EventSink for Builder<'source> {
             .last()
             .map(|c| format!(" in {c:?}"))
             .unwrap_or("".to_string());
-        self.errors
-            .push((format!("{msg}{context} @ {position}"), position));
+        self.errors.push((format!("{msg}{context}"), position));
     }
 }
 impl<'tokens> Builder<'tokens> {
@@ -88,10 +87,13 @@ impl<'tokens> Builder<'tokens> {
         }
     }
 
-    fn finish(self) -> (syntax::Node, Vec<String>) {
+    fn finish(self) -> (syntax::Node, Vec<Error>) {
         (
             self.builder.finish(),
-            self.errors.into_iter().map(|(msg, _)| msg).collect(),
+            self.errors
+                .into_iter()
+                .map(|(msg, pos)| Error { msg, pos })
+                .collect(),
         )
     }
 }
@@ -149,7 +151,6 @@ fn parse_impl(
                 }
                 // Now push all non-dead node parents.
                 for kind in nodes.drain(..).rev() {
-                    // (TODO: do `TOMBSTONE` nodes actually appear here, and if so why?)
                     if kind != TOMBSTONE {
                         event_sink.start_node(kind);
                     }
@@ -162,8 +163,14 @@ fn parse_impl(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Output {
     pub root: syntax::Node,
-    pub errors: Vec<String>,
+    pub errors: Vec<Error>,
+}
+
+#[derive(Debug)]
+pub struct Error {
+    pub msg: String,
+    pub pos: Position,
 }

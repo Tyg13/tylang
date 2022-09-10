@@ -7,6 +7,5 @@ edition = "2021"
 
 [dependencies]
 bir = { path = "../bir/" }
+sema = { path = "../sema/" }
 utils = { path = "../utils" }
-log = "0.4.8"
-env_logger = "0.7.1"

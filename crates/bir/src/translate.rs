@@ -1,254 +1,299 @@
-use std::rc::Rc;
+use ast::{Node, Token};
+use std::sync::Arc;
 
+use crate::build::*;
+use crate::id::*;
 use crate::types::*;
-use ast::{self, Token};
 
-pub fn module(module: &ast::Module) -> Option<Module> {
-    let mut functions = Vec::new();
-    for func in module.items().filter_map(|item| item.fn_()) {
-        functions.push(function(&func)?);
+pub fn ast(module: &Arc<ast::Module>) -> crate::Map {
+    let mut builder = Builder::new();
+
+    let module_ = builder.new_module();
+    builder.set_ast(module_, module.clone());
+    builder.set_current_module(module_);
+
+    for typedef in module.items().filter_map(|item| item.type_()) {
+        typedef_(&mut builder, typedef);
     }
-    let mut type_definitions = Vec::new();
-    for type_ in module.items().filter_map(|item| item.type_()) {
-        type_definitions.push(type_definition(&type_)?);
-    }
-    Some(Module {
-        functions,
-        types: type_definitions,
-    })
-}
 
-fn function(function: &ast::FnDef) -> Option<Function> {
-    let identifier = function.name()?.ident()?.text().to_string();
-    let mut parameters = Vec::new();
-    for p in function.param_list().unwrap().params() {
-        parameters.push(param(&p)?);
-    }
-    let return_type = if let Some(ty) = function.type_() {
-        Some(type_(&ty)?)
-    } else {
-        None
-    };
-    let body = if let Some(block) = function.block() {
-        Some(scope(&block)?)
-    } else {
-        None
-    };
-    Some(Function {
-        identifier,
-        parameters,
-        body,
-        return_type,
-    })
-}
+    for fn_ in module.items().filter_map(|item| item.fn_()) {
+        let identifier = fn_.name().unwrap().text();
 
-fn name_(name: &ast::Name) -> Option<String> {
-    Some(name.ident()?.text().to_string())
-}
+        let return_type = if let Some(ty) = fn_.type_() {
+            typeref_(&mut builder, &ty)
+        } else {
+            builder.new_typeref(TypeRefKind::Void)
+        };
 
-fn param(param: &ast::Param) -> Option<Parameter> {
-    match param {
-        ast::Param::NamedParam(param) => Some(Parameter::Named {
-            name: name_(&param.name()?)?,
-            typ_: type_(&param.type_()?)?,
-        }),
-        ast::Param::VaParam(..) => Some(Parameter::VariableArgs),
-    }
-}
+        let fn_id = builder.new_function(&identifier, return_type);
+        builder.set_ast(fn_id, fn_.clone());
+        builder.set_current_function(fn_id);
 
-fn type_(ty: &ast::Type) -> Option<TypeRef> {
-    Some(match ty {
-        ast::Type::BasicType(ty) => {
-            let name = ty.ident()?.text().to_string();
-            if name.as_str() == "void" {
-                TypeRef::Void
-            } else {
-                TypeRef::Basic { name }
+        for param in fn_.param_list().unwrap().params() {
+            match param.as_ref() {
+                ast::Param::NamedParam(param) => {
+                    let name = param.name().unwrap().text();
+                    let ty = typeref_(&mut builder, &param.type_().unwrap());
+                    builder.new_param(name, ty);
+                }
+                ast::Param::VaParam(_) => {
+                    builder.new_va_param();
+                }
             }
         }
-        ast::Type::PointerType(ty) => TypeRef::Pointer {
-            pointee: Rc::new(type_(&ty.pointee().unwrap())?),
-        },
-    })
+
+        if let Some(body) = fn_.block() {
+            let id = block_(
+                &mut builder,
+                ScopeKind::Function,
+                &format!("{identifier}.body"),
+                &body,
+            );
+            builder.current_function().body = Some(id);
+        }
+    }
+
+    builder.finish()
 }
 
-fn scope(block: &ast::Block) -> Option<Scope> {
-    let mut items = Vec::new();
-    for item in block.items() {
-        items.push(item_(&item)?);
-    }
-    let expr = if let Some(expr) = block.expr() {
-        Some(expr_(&expr)?)
-    } else {
-        None
+fn typedef_(builder: &mut Builder, typedef: Arc<ast::TypeItem>) -> ID {
+    let identifier = typedef.ident().unwrap();
+    let members = typedef
+        .members()
+        .map(|member| TypeMember {
+            identifier: member.ident().unwrap().text().to_string(),
+            ty: typeref_(builder, &member.type_().unwrap()),
+        })
+        .collect();
+    let id = builder.new_typedef(identifier.text(), members);
+    builder.set_ast(id, typedef.clone());
+    id
+}
+
+fn typeref_(builder: &mut Builder, ty: &Arc<ast::Type>) -> ID {
+    let kind = match ty.as_ref() {
+        ast::Type::BasicType(ty) => match ty.ident().unwrap().text() {
+            "void" => TypeRefKind::Void,
+            name => TypeRefKind::Named {
+                name: name.to_string(),
+            },
+        },
+        ast::Type::PointerType(ty) => TypeRefKind::Pointer {
+            pointee: typeref_(builder, &ty.pointee().unwrap()),
+        },
     };
-    Some(Scope { items, expr })
+    let id = builder.new_typeref(kind);
+    builder.set_ast(id, ty.clone());
+    id
 }
 
-fn item_(item: &ast::Item) -> Option<Item> {
-    match item {
-        ast::Item::FnDef(fn_item) => Some(Item::FnDef(function(fn_item)?)),
-        ast::Item::Let(let_) => let_item(&let_),
-        ast::Item::ExprItem(expr) => expr_item(&expr),
-        ast::Item::TypeItem(type_) => todo!(),
+fn block_(builder: &mut Builder, kind: ScopeKind, label: &str, block: &Arc<ast::Block>) -> ID {
+    let id = builder.in_new_scope(label.to_string(), kind, |builder| {
+        for item in block.items() {
+            item_(builder, &item);
+        }
+        if let Some(expr) = block.expr() {
+            builder.current_scope().return_expr = Some(expr_(builder, &expr));
+        }
+    });
+    builder.set_ast(id, block.clone());
+    id
+}
+
+fn item_(builder: &mut Builder, item: &Arc<ast::Item>) {
+    let id = match item.as_ref() {
+        ast::Item::Let(item) => let_(builder, item),
+        ast::Item::ExprItem(expr) => expr_item(builder, expr),
+        _ => todo!(),
+    };
+    builder.set_ast(id, item.clone());
+}
+
+fn let_(builder: &mut Builder, item: &Arc<ast::Let>) -> ID {
+    let name = item.name().unwrap().text().to_string();
+    let ty = item.type_().map(|ty| typeref_(builder, &ty));
+    let expr = item.expr().map(|ex| expr_(builder, &ex));
+    let id = builder.new_let_item(name, ty, expr);
+    builder.set_ast(id, item.clone());
+    id
+}
+
+fn expr_item(builder: &mut Builder, expr: &Arc<ast::ExprItem>) -> ID {
+    let expr_id = expr_(builder, &expr.expr().unwrap());
+    let item_id = builder.new_item(ItemKind::Expr(expr_id));
+    builder.set_ast(item_id, expr.clone());
+    item_id
+}
+
+fn expr_(builder: &mut Builder, expr: &Arc<ast::Expr>) -> ID {
+    let kind = match expr.as_ref() {
+        ast::Expr::Group(expr) => return group_expr(builder, &expr),
+        ast::Expr::Literal(lit) => literal_expr(builder, &lit),
+        ast::Expr::NameRef(name) => name_ref(builder, &name),
+        ast::Expr::PrefixExpr(expr) => prefix_expr(builder, &expr),
+        ast::Expr::BinExpr(expr) => binary_expr(builder, &expr),
+        ast::Expr::Block(expr) => block_expr(builder, &expr),
+        ast::Expr::CallExpr(expr) => call_expr(builder, &expr),
+        ast::Expr::Return(expr) => return_expr(builder, &expr),
+        ast::Expr::IndexExpr(expr) => index_expr(builder, &expr),
+        ast::Expr::IfExpr(expr) => if_expr(builder, &expr),
+        ast::Expr::LoopExpr(expr) => loop_expr(builder, &expr),
+        ast::Expr::WhileExpr(expr) => while_expr(builder, &expr),
+        ast::Expr::Break(expr) => break_expr(builder, &expr),
+        ast::Expr::Continue(expr) => continue_expr(builder, &expr),
+    };
+    let id = builder.new_expr(kind);
+    builder.set_ast(id, expr.clone());
+    id
+}
+
+fn literal_expr(builder: &mut Builder, lit: &Arc<ast::Literal>) -> ExprKind {
+    let id = literal(builder, lit);
+    builder.set_ast(id, lit.clone());
+    ExprKind::Literal(id)
+}
+
+fn name_ref(_: &mut Builder, ref_: &Arc<ast::NameRef>) -> ExprKind {
+    ExprKind::NameRef {
+        name: ref_.name().unwrap().text().to_string(),
     }
 }
 
-fn let_item(let_: &ast::Let) -> Option<Item> {
-    Some(Item::Let {
-        name: name_(&let_.name()?)?,
-        typ_: if let Some(ty) = let_.type_() {
-            Some(type_(&ty)?)
-        } else {
-            None
-        },
-        expr: if let Some(expr) = let_.expr() {
-            Some(expr_(&expr)?)
-        } else {
-            None
-        },
-    })
-}
-
-fn expr_item(expr: &ast::ExprItem) -> Option<Item> {
-    Some(Item::Expr(expr_(&expr.expr()?)?))
-}
-
-fn expr_(expr: &ast::Expr) -> Option<Expr> {
-    match expr {
-        ast::Expr::Literal(lit) => literal(&lit),
-        ast::Expr::NameRef(name) => name_ref(&name),
-        ast::Expr::PrefixExpr(expr) => prefix_expr(&expr),
-        ast::Expr::BinExpr(expr) => binary_expr(&expr),
-        ast::Expr::Group(expr) => group_expr(&expr),
-        ast::Expr::Block(expr) => block_expr(&expr),
-        ast::Expr::CallExpr(expr) => call_expr(&expr),
-        ast::Expr::Return(expr) => return_expr(&expr),
-        ast::Expr::IndexExpr(expr) => index_expr(&expr),
-        ast::Expr::IfExpr(expr) => if_expr(&expr),
-        ast::Expr::LoopExpr(expr) => loop_expr(&expr),
-    }
-}
-
-fn literal(lit: &ast::Literal) -> Option<Expr> {
-    // Trim off leading and trailing quotation marks '"'
-    fn trim(s: &str) -> String {
-        s[1..s.len() - 1].to_string()
-    }
-
-    Some(match lit.value().unwrap() {
-        ast::LiteralValue::Number(n) => Expr::Literal(Literal::Number(n.text().parse().unwrap())),
-        ast::LiteralValue::Str(s) => Expr::Literal(Literal::Str(trim(s.text()))),
-    })
-}
-
-fn name_ref(ref_: &ast::NameRef) -> Option<Expr> {
-    Some(Expr::NameRef {
-        name: ref_.name()?.text().to_string(),
-    })
-}
-
-fn prefix_expr(expr: &ast::PrefixExpr) -> Option<Expr> {
-    let kind = match expr.op()?.text() {
+fn prefix_expr(builder: &mut Builder, expr: &Arc<ast::PrefixExpr>) -> ExprKind {
+    let kind = match expr.op().unwrap().text() {
         "+" => OpKind::Plus,
         "-" => OpKind::Minus,
         _ => unreachable!(),
     };
-    let operand = expr_(&expr.operand().unwrap())?;
-    Some(Expr::Op(Op {
-        fixity: Fixity::Prefix,
+    let operand = expr_(builder, &expr.operand().unwrap());
+    ExprKind::Op(Op {
+        fixity: OpFixity::Prefix,
         kind,
         operands: vec![operand],
-    }))
+    })
 }
 
-fn binary_expr(expr: &ast::BinExpr) -> Option<Expr> {
-    let kind = match expr.op()?.text() {
-        "+"  => OpKind::Plus,
-        "-"  => OpKind::Minus,
-        "*"  => OpKind::Multiply,
-        "/"  => OpKind::Divide,
-        "."  => OpKind::FieldAccess,
+fn binary_expr(builder: &mut Builder, expr: &Arc<ast::BinExpr>) -> ExprKind {
+    let kind = match expr.op().unwrap().text() {
+        "+" => OpKind::Plus,
+        "-" => OpKind::Minus,
+        "*" => OpKind::Multiply,
+        "/" => OpKind::Divide,
+        "." => OpKind::FieldAccess,
         "==" => OpKind::Equals,
-        ">"  => OpKind::GreaterThan,
+        ">" => OpKind::GreaterThan,
         ">=" => OpKind::GreaterThanEquals,
-        "<"  => OpKind::LessThan,
+        "<" => OpKind::LessThan,
         "<=" => OpKind::LessThanEquals,
-        "="  => OpKind::Assignment,
+        "=" => OpKind::Assignment,
         kind => panic!("unrecognized op: {kind}"),
     };
-    let lhs = expr_(&expr.lhs()?)?;
-    let rhs = expr_(&expr.rhs()?)?;
-    Some(Expr::Op(Op {
-        fixity: Fixity::Infix,
+    let lhs = expr_(builder, &expr.lhs().unwrap());
+    let rhs = expr_(builder, &expr.rhs().unwrap());
+    ExprKind::Op(Op {
+        fixity: OpFixity::Infix,
         kind,
         operands: vec![lhs, rhs],
-    }))
+    })
 }
 
-fn group_expr(group: &ast::Group) -> Option<Expr> {
-    expr_(&group.inner().unwrap())
+fn group_expr(builder: &mut Builder, group: &Arc<ast::Group>) -> ID {
+    // Just return inner expression
+    expr_(builder, &group.inner().unwrap())
 }
 
-fn block_expr(block: &ast::Block) -> Option<Expr> {
-    let mut items = Vec::new();
-    for item in block.items() {
-        items.push(item_(&item)?);
+fn block_expr(builder: &mut Builder, block: &Arc<ast::Block>) -> ExprKind {
+    ExprKind::Block {
+        scope: block_(builder, ScopeKind::Block, "block", block),
     }
-    Some(Expr::Block { items })
 }
 
-fn call_expr(expr: &ast::CallExpr) -> Option<Expr> {
-    let receiver = Box::new(expr_(&expr.receiver().unwrap())?);
+fn call_expr(builder: &mut Builder, expr: &Arc<ast::CallExpr>) -> ExprKind {
+    let receiver = expr_(builder, &expr.receiver().unwrap());
     let mut operands = Vec::new();
     for arg in expr.arguments().by_ref() {
-        operands.push(expr_(&arg)?);
+        operands.push(expr_(builder, &arg));
     }
-    Some(Expr::Call { receiver, operands })
+    ExprKind::Call { receiver, operands }
 }
 
-fn return_expr(ret: &ast::Return) -> Option<Expr> {
-    Some(Expr::Return {
-        expr: Box::new(expr_(&ret.expr().unwrap())?),
-    })
+fn return_expr(builder: &mut Builder, ret: &Arc<ast::Return>) -> ExprKind {
+    ExprKind::Return {
+        expr: expr_(builder, &ret.expr().unwrap()),
+    }
 }
 
-fn index_expr(expr: &ast::IndexExpr) -> Option<Expr> {
-    Some(Expr::Index {
-        receiver: Box::new(expr_(&expr.receiver().unwrap())?),
-        index: Box::new(expr_(&expr.index().unwrap())?),
-    })
+fn index_expr(builder: &mut Builder, expr: &Arc<ast::IndexExpr>) -> ExprKind {
+    ExprKind::Index {
+        receiver: expr_(builder, &expr.receiver().unwrap()),
+        index: expr_(builder, &expr.index().unwrap()),
+    }
 }
 
-fn if_expr(expr: &ast::IfExpr) -> Option<Expr> {
-    Some(Expr::Branch {
-        condition: Box::new(expr_(&expr.condition().unwrap())?),
-        left: Box::new(scope(&expr.then().unwrap())?),
-        right: if let Some(alt) = expr.alternate() {
-            Box::new(scope(&alt)?)
-        } else {
-            Box::new(Scope::empty())
-        },
-    })
+fn if_expr(builder: &mut Builder, expr: &Arc<ast::IfExpr>) -> ExprKind {
+    let condition = expr_(builder, &expr.condition().unwrap());
+    let left = block_(builder, ScopeKind::Block, "then", &expr.then().unwrap());
+    let (kind, right) = if let Some(alt) = expr.alternate() {
+        let right = block_(builder, ScopeKind::Block, "else", &alt);
+        (BranchKind::IfElse, right)
+    } else {
+        (BranchKind::If, NONE)
+    };
+    ExprKind::Branch {
+        condition,
+        kind,
+        left,
+        right,
+    }
 }
 
-fn loop_expr(loop_: &ast::LoopExpr) -> Option<Expr> {
-    Some(Expr::Loop {
+fn loop_expr(builder: &mut Builder, loop_: &Arc<ast::LoopExpr>) -> ExprKind {
+    ExprKind::Loop {
         kind: LoopKind::Loop,
-        body: Box::new(scope(&loop_.body().unwrap())?),
-    })
+        body: block_(builder, ScopeKind::Block, "loop", &loop_.body().unwrap()),
+    }
 }
 
-fn type_definition(typ_: &ast::TypeItem) -> Option<TypeDefinition> {
-    let mut members = Vec::new();
-    for member in typ_.members() {
-        members.push(TypeMember {
-            name: member.ident().unwrap().text().to_string(),
-            typ_: type_(&member.type_().unwrap())?,
-        });
+fn while_expr(builder: &mut Builder, while_: &Arc<ast::WhileExpr>) -> ExprKind {
+    ExprKind::Loop {
+        kind: LoopKind::While,
+        body: builder.in_new_scope("while".to_string(), ScopeKind::Block, |builder| {
+            let condition = expr_(builder, &while_.condition().unwrap());
+            let body = block_(builder, ScopeKind::Loop, "body", &while_.body().unwrap());
+            let exit_block =
+                builder.in_new_scope("exit".to_string(), ScopeKind::Block, |builder| {
+                    builder.new_expr_item(ExprKind::Break {
+                        label: builder.last_loop_label(),
+                    });
+                });
+            let id = builder.new_expr_item(ExprKind::Branch {
+                condition,
+                kind: BranchKind::IfElse,
+                left: body,
+                right: exit_block,
+            });
+            builder.set_ast(id, while_.clone());
+        }),
     }
-    Some(TypeDefinition {
-        name: typ_.ident().unwrap().text().to_string(),
-        members,
-    })
+}
+
+fn break_expr(builder: &mut Builder, break_: &Arc<ast::Break>) -> ExprKind {
+    ExprKind::Break {
+        label: builder.last_loop_label(),
+    }
+}
+
+fn continue_expr(builder: &mut Builder, continue_: &Arc<ast::Continue>) -> ExprKind {
+    ExprKind::Continue {
+        label: builder.last_loop_label(),
+    }
+}
+
+fn literal(builder: &mut Builder, lit: &Arc<ast::Literal>) -> ID {
+    let id = builder.new_literal(match lit.value().unwrap() {
+        ast::LiteralValue::Number(n) => Literal::Number(n.text().parse().unwrap()),
+        ast::LiteralValue::Str(s) => Literal::Str(s.text().to_string()),
+    });
+    builder.set_ast(id, lit.clone());
+    id
 }

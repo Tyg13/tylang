@@ -1,274 +1,190 @@
 use crate::types::*;
+use std::fmt::Write;
 
-pub fn to_string(module: &Module) -> String {
-    let mut out = Vec::new();
-    module_(&mut out, module).unwrap();
-    String::from_utf8(out).unwrap()
+struct Writer {
+    buf: String,
+    indent_str: String,
 }
 
-fn join<T>(
-    out: &mut dyn std::io::Write,
-    sep: &str,
-    ts: impl Iterator<Item = T>,
-    mut each: impl FnMut(&mut dyn std::io::Write, T) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    let mut first = true;
-    for t in ts {
-        if !first {
-            write!(out, "{sep}")?;
-        }
-        first = false;
-        each(out, t)?;
-    }
-    Ok(())
-}
-
-fn module_(out: &mut dyn std::io::Write, module: &Module) -> std::io::Result<()> {
-    writeln!(out, "Types = {{")?;
-    for (idx, ty) in module.types.iter().enumerate() {
-        write!(out, "  {idx}: ")?;
-        type_(out, ty, &module.types)?;
-        write!(out, "\n")?;
-    }
-    writeln!(out, "}}")?;
-
-    join(out, "\n", module.functions.iter(), |out, function| {
-        function_(out, function, &module.types)
-    })?;
-    Ok(())
-}
-
-fn type_(out: &mut dyn std::io::Write, ty: &Type, types: &[Type]) -> std::io::Result<()> {
-    match ty {
-        Type::Void => write!(out, "void")?,
-        Type::Basic { name } => write!(out, "{name}")?,
-        Type::Integer { size } => write!(out, "i{size}")?,
-        Type::Pointer { target } => {
-            write!(out, "*")?;
-            type_(out, &types[target.0], types)?;
-        }
-        Type::Struct { name, members } => {
-            write!(out, "{name} {{ ")?;
-            join(out, ", ", members.iter(), |out, member| {
-                write!(out, "{}: ", member.name)?;
-                type_(out, &types[member.typ_.0], types)?;
-                Ok(())
-            })?;
-            write!(out, " }}")?;
+impl Writer {
+    fn new() -> Self {
+        Self {
+            buf: String::new(),
+            indent_str: String::new(),
         }
     }
-    Ok(())
-}
 
-fn function_(
-    out: &mut dyn std::io::Write,
-    function: &Function,
-    types: &[Type],
-) -> std::io::Result<()> {
-    write!(out, "fn {}(", function.name)?;
-    let mut had_params = false;
-    join(out, ", ", function.parameters.iter(), |out, param| {
-        had_params = true;
-        param_(out, param, types)
-    })?;
-    if function.is_var_args {
-        if had_params {
-            write!(out, ", ")?;
-        }
-        write!(out, "...")?;
+    fn indent(&mut self) {
+        self.indent_str.push_str(&str::repeat(" ", 4));
     }
-    write!(out, ") -> ")?;
-    type_(out, &types[function.return_type.0], types)?;
-    if function.instructions.len() > 0 {
-        instructions_(out, &function, types)?;
-    } else {
-        write!(out, ";")?;
+
+    fn dedent(&mut self) {
+        self.indent_str.truncate(self.indent_str.len() - 4);
     }
-    Ok(())
-}
 
-fn param_(out: &mut dyn std::io::Write, param: &Parameter, types: &[Type]) -> std::io::Result<()> {
-    write!(out, "{}: ", param.name)?;
-    type_(out, &types[param.type_.0], types)?;
-    Ok(())
-}
-
-fn instructions_(
-    out: &mut dyn std::io::Write,
-    function: &Function,
-    types: &[Type],
-) -> std::io::Result<()> {
-    write!(out, " {{")?;
-    let mut first = true;
-    for (idx, instruction) in function.instructions.iter().enumerate() {
-        if first {
-            write!(out, "\n")?;
-        }
-        if !first && function.blocks.find_vertex(&idx).is_some() {
-            writeln!(out)?;
-        }
-        first = false;
-        write!(out, "  {idx}: ")?;
-        instruction_(
-            out,
-            instruction,
-            &function.parameters,
-            &function.blocks,
-            types,
-        )?;
-        write!(out, "\n")?;
+    fn last_was_newline(&self) -> bool {
+        self.buf.chars().last().map(|c| c == '\n').unwrap_or(false)
     }
-    write!(out, "}}")?;
-    Ok(())
 }
 
-fn instruction_(
-    out: &mut dyn std::io::Write,
-    instruction: &Instruction,
-    parameters: &[Parameter],
-    blocks: &BlockGraph,
-    types: &[Type],
-) -> std::io::Result<()> {
-    match instruction {
-        Instruction::Nop => {
-            write!(out, "nop")?;
+impl std::fmt::Write for Writer {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        if !self.indent_str.is_empty() && self.last_was_newline() {
+            self.buf.write_str(&self.indent_str)?;
         }
-        Instruction::Declaration {
-            name,
-            type_: ty,
-            value,
-            promoted,
-        } => {
-            if *promoted {
-                write!(out, "(P)")?;
+        self.buf.write_str(s)
+    }
+}
+
+pub fn print(sema: &sema::Map, mod_: &Module) {
+    println!("{}", to_string(sema, mod_))
+}
+
+pub fn dump_users(mod_: &Module) {
+    for f in mod_.functions.iter() {
+        let mut first_val = true;
+        let val_sep = utils::ListSeparator::new("\n");
+        for val in f.values() {
+            if first_val {
+                println!("{}:", f.ident);
+                first_val = false;
             }
-            if name.is_empty() {
-                write!(out, "unnamed ")?;
+            let user_sep = utils::ListSeparator::new(", ");
+            let mut first_user = true;
+            for user in f.users(&val.id) {
+                if first_user {
+                    print!("  {val_sep}{:?}: ", val.id);
+                    first_user = false;
+                }
+                print!("{user_sep}{:?}", user);
+            }
+        }
+    }
+}
+
+pub fn to_string(sema: &sema::Map, mod_: &Module) -> String {
+    let mut writer = Writer::new();
+    write_mod(&mut writer, sema, mod_);
+    writer.buf
+}
+
+fn write_mod(w: &mut Writer, sema: &sema::Map, mod_: &Module) {
+    let ls = utils::ListSeparator::new("\n");
+    for f in &mod_.functions {
+        write!(w, "{ls}");
+        write_fn(w, sema, &Context::full(mod_, f), f);
+    }
+}
+
+fn write_fn(w: &mut Writer, sema: &sema::Map, c: &Context, f: &Function) {
+    write!(w, "fn {}(", f.ident);
+    let ls = utils::ListSeparator::default();
+    for param in &f.params {
+        let param = sema.param(f.sema(param).unwrap()).unwrap();
+        let name = param.ident(sema);
+        let ty = param.ty(sema).repr(sema);
+        write!(w, "{ls}{name}: {ty}");
+    }
+    write!(w, ")");
+
+    if f.insts.is_empty() {
+        write!(w, ";");
+        return;
+    }
+
+    writeln!(w, "{{");
+    w.indent();
+    let ls = utils::ListSeparator::new("\n");
+    for inst in &f.insts {
+        write!(w, "{ls}");
+        write_inst(w, sema, c, inst);
+    }
+    w.dedent();
+    write!(w, "\n}}");
+}
+
+fn write_inst(w: &mut Writer, sema: &sema::Map, ctx: &Context, inst: &Inst) {
+    match inst.kind {
+        InstKind::Store => {
+            let dest = &inst.lval.unwrap();
+            let f = ctx.as_fn();
+            let store_to_var_or_param = match inst.val.kind(f) {
+                ValueKind::Param => true,
+                ValueKind::Inst => dest.is_var(f),
+                _ => false,
+            };
+            let src = &inst.rvals[0];
+            if store_to_var_or_param {
+                write_val(w, sema, ctx, dest);
+                write!(w, " = ");
+                write_val(w, sema, ctx, src);
             } else {
-                write!(out, "%{name}: ")?;
+                write_val(w, sema, ctx, dest);
+                write!(w, "^ = ");
+                write_val(w, sema, ctx, src);
             }
-            type_(out, &types[ty.0], types)?;
-            if let Some(value) = value {
-                write!(out, " = ")?;
-                value_or_operation_(out, &value, parameters, types)?;
+            return;
+        }
+        InstKind::Var => {
+            write!(w, "var ");
+            write_val(w, sema, ctx, &inst.val);
+            return;
+        }
+        _ => {}
+    }
+
+    if let Some(lval) = &inst.lval {
+        write_val(w, sema, ctx, lval);
+        write!(w, " = ");
+    }
+
+    match inst.kind {
+        InstKind::Call => {
+            let called_fn = &inst.rvals[0];
+            write_val(w, sema, ctx, called_fn);
+            let arg_sep = utils::ListSeparator::new(", ");
+            write!(w, "(");
+            for op in inst.rvals.iter().skip(1) {
+                write!(w, "{arg_sep}");
+                write_val(w, sema, ctx, op)
             }
+            write!(w, ")");
+            return;
         }
-        Instruction::Call { function, operands } => {
-            write!(out, "call {function}(")?;
-            join(out, ", ", operands.iter(), |out, op| {
-                value_(out, op, parameters, types)?;
-                Ok(())
-            })?;
-            write!(out, ")")?;
+        InstKind::Offset => {
+            write!(w, "&");
+            write_val(w, sema, ctx, &inst.rvals[0]);
+            write!(w, "[");
+            write_val(w, sema, ctx, &inst.rvals[1]);
+            write!(w, "]");
+            return;
         }
-        Instruction::Jump { target } => {
-            write!(out, "jmp @{}", target.data(&blocks))?;
+        InstKind::Load => {
+            write_val(w, sema, ctx, &inst.rvals[0]);
+            write!(w, "^");
+            return;
         }
-        Instruction::Branch {
-            condition,
-            left,
-            right,
-        } => {
-            write!(out, "branch ")?;
-            value_(out, &condition, parameters, types)?;
-            write!(out, " @{}, @{}", left.data(&blocks), right.data(&blocks))?;
-        }
-        Instruction::Return { value } => {
-            write!(out, "return ")?;
-            value_(out, &value, parameters, types)?;
-        }
-        Instruction::Choice {
-            left_value,
-            left,
-            right_value,
-            right,
-        } => {
-            write!(out, "choice [@{}, ", left.data(&blocks))?;
-            value_(out, &left_value, parameters, types)?;
-            write!(out, "] [@{}, ", right.data(&blocks))?;
-            value_(out, &right_value, parameters, types)?;
-            write!(out, "]")?;
-        }
-        Instruction::Truncate { to_type, value } => {
-            write!(out, "trunc ")?;
-            type_(out, &types[to_type.0], types)?;
-            write!(out, " to ")?;
-            value_(out, &value, parameters, types)?;
-        }
-        Instruction::Extend { to_type, value } => {
-            write!(out, "extend ")?;
-            value_(out, &value, parameters, types)?;
-            write!(out, " to ")?;
-            type_(out, &types[to_type.0], types)?;
-        }
-    }
-    Ok(())
-}
-
-fn value_or_operation_(
-    out: &mut dyn std::io::Write,
-    value: &ValueOrOperation,
-    parameters: &[Parameter],
-    types: &[Type],
-) -> std::io::Result<()> {
-    match value {
-        ValueOrOperation::Value(val) => value_(out, &val, parameters, types),
-        ValueOrOperation::Operation(op) => op_(out, &op, parameters, types),
-    }
-}
-
-fn value_(
-    out: &mut dyn std::io::Write,
-    value: &Value,
-    parameters: &[Parameter],
-    types: &[Type],
-) -> std::io::Result<()> {
-    match value {
-        Value::Void => write!(out, "void")?,
-        Value::Literal(lit) => match lit {
-            Literal::Number(n) => write!(out, "${n}")?,
-            Literal::Str(s) => write!(out, "\"{s}\"")?,
+        InstKind::Add => write!(w, "add "),
+        InstKind::Return => write!(w, "return "),
+        InstKind::Cmp { kind } => match kind {
+            CmpKind::Eq => write!(w, "eq"),
         },
-        Value::VariableRef(idx) => write!(out, "%{idx}")?,
-        Value::ParamRef(idx) => {
-            let param = &parameters[*idx];
-            write!(out, "{}", param.name)?;
-        }
+        InstKind::Copy => write!(w, "copy "),
+        _ => unreachable!(),
+    };
+
+    let ls = utils::ListSeparator::default();
+    for rval in &inst.rvals {
+        write!(w, "{ls}");
+        write_val(w, sema, ctx, rval);
     }
-    Ok(())
 }
 
-fn op_(
-    out: &mut dyn std::io::Write,
-    op: &Operation,
-    parameters: &[Parameter],
-    types: &[Type],
-) -> std::io::Result<()> {
-    fn write_op(
-        out: &mut dyn std::io::Write,
-        idx: usize,
-        op: &Operation,
-        parameters: &[Parameter],
-        types: &[Type],
-    ) -> std::io::Result<()> {
-        value_(out, &op.operands[idx], parameters, types)
+const DEBUG_VALUE_NUMS: bool = false;
+
+fn write_val(w: &mut Writer, sema: &sema::Map, ctx: &Context, val: &ValueRef) {
+    write!(w, "{}", val.repr(ctx.clone(), sema));
+    if DEBUG_VALUE_NUMS {
+        write!(w, " ({})", val.id.0);
     }
-    let (op_str, num_ops) = match op.kind {
-        OperationKind::Add => ("add", 2),
-        OperationKind::Subtract => ("sub", 2),
-        OperationKind::Multiply => ("mul", 2),
-        OperationKind::Divide => ("div", 2),
-        OperationKind::LessThan => ("lt", 2),
-        OperationKind::LessThanEquals => ("lte", 2),
-        OperationKind::GreaterThan => ("gt", 2),
-        OperationKind::GreaterThanEquals => ("gte", 2),
-        OperationKind::Equals => ("eq", 2),
-        OperationKind::Index => ("index", 2),
-        OperationKind::Assignment => ("assign", 2),
-    };
-    write!(out, "{op_str} ")?;
-    join(out, ", ", 0..num_ops, |out, idx| {
-        write_op(out, idx, op, parameters, types)
-    })?;
-    Ok(())
 }

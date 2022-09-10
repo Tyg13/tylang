@@ -12,7 +12,9 @@ pub(super) fn let_item(parser: &mut Parser<'_>) {
             }
             if parser.maybe(T![=]) {
                 parser.expect_token(T![=]);
-                expressions::expr(parser);
+                if expressions::expr(parser).is_none() {
+                    parser.error("No expression");
+                }
             }
             parser.expect_token(T![;]);
         });

@@ -1,14 +1,19 @@
+use std::sync::Arc;
+
 use cst::green::SyntaxKind::{self, *};
 use cst::syntax;
 use cst::T;
 
 pub trait Node {
-    fn cast(node: syntax::Node) -> Option<Self>
+    fn cast(node: syntax::Node) -> Option<Arc<Self>>
     where
         Self: Sized;
     fn syntax(&self) -> &syntax::Node;
     fn text(&self) -> String {
         self.syntax().text()
+    }
+    fn kind(&self) -> SyntaxKind {
+        self.syntax().kind()
     }
 }
 
@@ -26,29 +31,25 @@ pub trait HasKind {
     const KIND: SyntaxKind;
 }
 
-pub trait MatchKind {
-    fn same_kind(kind: &SyntaxKind) -> bool;
-}
-
 #[rustfmt::skip]
 mod grammar {
     use super::*;
 
-    macro_rules! decl_enum {
-        (enum $EnumNode:ident { $($Variant:ident ($sn_name:ident),)+ }) => {
+    macro_rules! decl_node_enum {
+        (enum $EnumNode:ident { $($Variant:ident ($getter_name:ident),)+ }) => {
             #[derive(Debug, Clone, PartialEq, Eq, Hash)]
             pub enum $EnumNode {
                 $(
-                    $Variant($Variant)
+                    $Variant(Arc<$Variant>)
                 ),*
             }
             impl Node for $EnumNode {
                 #[inline]
-                fn cast(node: syntax::Node) -> Option<Self> {
+                fn cast(node: syntax::Node) -> Option<Arc<Self>> {
                     match node.green.kind {
-                        $($Variant::KIND => Some(Self::$Variant(
+                        $($Variant::KIND => Some(Arc::new(Self::$Variant(Arc::new(
                             $Variant { syntax: node }
-                        )),)+
+                        )))),)+
                         _ => None
                     }
                 }
@@ -63,7 +64,7 @@ mod grammar {
             impl $EnumNode {
                 $(
                     #[inline]
-                    pub fn $sn_name(&self) -> Option<$Variant> {
+                    pub fn $getter_name(&self) -> Option<Arc<$Variant>> {
                         match self {
                             Self::$Variant(data) => Some(data.clone()),
                             _ => None,
@@ -90,7 +91,7 @@ mod grammar {
     }
 
     macro_rules! decl_token_enum {
-        (enum $EnumToken:ident { $($Variant:ident ($sn_name:ident),)+ }) => {
+        (enum $EnumToken:ident { $($Variant:ident ($getter_name:ident),)+ }) => {
             #[derive(Debug, Clone, PartialEq, Eq, Hash)]
             pub enum $EnumToken {
                 $(
@@ -100,14 +101,12 @@ mod grammar {
             impl Token for $EnumToken {
                 #[inline]
                 fn cast(token: syntax::Token) -> Option<Self> {
-                    $(
-                        if <$Variant as MatchKind>::same_kind(&token.green.kind) {
-                            return Some(Self::$Variant(
-                                $Variant { syntax: token }
-                            ));
-                        }
-                    )+
-                    None
+                    match token.green.kind {
+                        $($Variant::KIND => Some(Self::$Variant(
+                            $Variant { syntax: token }
+                        )),)+
+                        _ => None,
+                    }
                 }
 
                 #[inline]
@@ -120,7 +119,7 @@ mod grammar {
             impl $EnumToken {
                 $(
                     #[inline]
-                    pub fn $sn_name(&self) -> Option<$Variant> {
+                    pub fn $getter_name(&self) -> Option<$Variant> {
                         match self {
                             Self::$Variant(data) => Some(data.clone()),
                             _ => None,
@@ -149,25 +148,25 @@ mod grammar {
     macro_rules! decl_node_child_impl {
         () => {};
         (($node_fn:ident: Node<$Child:ty>) $($rest:tt)*) => {
-            #[inline] pub fn $node_fn(&self) -> Option<$Child> {
+            #[inline] pub fn $node_fn(&self) -> Option<Arc<$Child>> {
                 self.syntax().children().find_map(<$Child as Node>::cast)
             }
             decl_node_child_impl!($($rest)*);
         };
         (($nth_node_fn:ident: NthNode<$index:literal, $Child:ty>) $($rest:tt)*) => {
-            #[inline] pub fn $nth_node_fn(&self) -> Option<$Child> {
+            #[inline] pub fn $nth_node_fn(&self) -> Option<Arc<$Child>> {
                 self.syntax().children().nth($index).and_then(<$Child as Node>::cast)
             }
             decl_node_child_impl!($($rest)*);
         };
         (($node_list_fn:ident: NodeList<$Child:ty>) $($rest:tt)*) => {
-            #[inline] pub fn $node_list_fn(&self) -> impl Iterator<Item = $Child> + '_ {
+            #[inline] pub fn $node_list_fn(&self) -> impl Iterator<Item = Arc<$Child>> + '_ {
                 self.syntax().children().filter_map(<$Child as Node>::cast)
             }
             decl_node_child_impl!($($rest)*);
         };
         (($node_list_fn:ident: NodeList<$index:literal, $Child:ty>) $($rest:tt)*) => {
-            #[inline] pub fn $node_list_fn(&self) -> impl Iterator<Item = $Child> + '_ {
+            #[inline] pub fn $node_list_fn(&self) -> impl Iterator<Item = Arc<$Child>> + '_ {
                 self.syntax().children().skip($index).filter_map(<$Child as Node>::cast)
             }
             decl_node_child_impl!($($rest)*);
@@ -243,9 +242,9 @@ mod grammar {
             }
             impl Node for $Node {
                 #[inline]
-                fn cast(node: syntax::Node) -> Option<Self> {
+                fn cast(node: syntax::Node) -> Option<Arc<Self>> {
                     match node.green.kind {
-                        $KIND => Some($Node { syntax: node }),
+                        $KIND => Some(Arc::new($Node { syntax: node })),
                         _ => None,
                     }
                 }
@@ -274,26 +273,20 @@ mod grammar {
     }
 
     macro_rules! decl_token {
-        (struct $Token:ident: $KIND:pat) => {
+        (struct $Token:ident: $($KIND:tt)*) => {
             #[derive(Debug, Clone, PartialEq, Eq, Hash)]
             pub struct $Token {
                 syntax: syntax::Token,
             }
-            impl MatchKind for $Token {
-                #[inline]
-                fn same_kind(kind: &SyntaxKind) -> bool {
-                    match kind {
-                        $KIND => true,
-                        _ => false,
-                    }
-                }
+            impl HasKind for $Token {
+                const KIND: SyntaxKind = $($KIND)*;
             }
             impl Token for $Token {
                 #[inline]
                 fn cast(token: syntax::Token) -> Option<Self> {
                     match token.green.kind {
                         #[allow(unused_parens)]
-                        $KIND => Some($Token { syntax: token }),
+                        $($KIND)* => Some($Token { syntax: token }),
                         _ => None,
                     }
                 }
@@ -321,7 +314,7 @@ mod grammar {
         (items: NodeList<Item>)
     });
 
-    decl_enum!(enum Item {
+    decl_node_enum!(enum Item {
         FnDef(fn_),
         Let(let_),
         ExprItem(expr_item),
@@ -329,13 +322,13 @@ mod grammar {
     });
 
     decl_node!(struct Let: LET_ITEM {
-        (let_kw    : Token<LetKw>    )
-        (name      : Node <Name>     )
-        (colon     : Token<Colon>    )
-        (type_     : Node <Type>     )
-        (equals    : Token<Equals>   )
-        (expr      : Node <Expr>     )
-        (semicolon : Token<SemiColon>)
+        (let_kw    : Token  <LetKw>    )
+        (name      : Node   <Name>     )
+        (colon     : Token  <Colon>    )
+        (type_     : Node   <Type>     )
+        (equals    : Token  <Equals>   )
+        (expr      : Node   <Expr>     )
+        (semicolon : Token  <SemiColon>)
     });
     decl_node!(struct FnDef: FN_ITEM {
         (fn_kw      : Token<FnKw>     )
@@ -371,7 +364,7 @@ mod grammar {
         (params  : NodeList<Param>     )
         (r_paren : Token   <RightParen>)
     });
-    decl_enum!(enum Param {
+    decl_node_enum!(enum Param {
         NamedParam(param),
         VaParam(va_param),
     });
@@ -387,7 +380,7 @@ mod grammar {
     decl_node!(struct Name: NAME {
         (ident: Token<Ident>)
     });
-    decl_enum!(enum Type {
+    decl_node_enum!(enum Type {
         BasicType(basic_type),
         PointerType(pointer_type),
     });
@@ -399,7 +392,7 @@ mod grammar {
         (pointee: Node<Type>)
     });
 
-    decl_enum!(enum Expr {
+    decl_node_enum!(enum Expr {
         Literal(literal),
         NameRef(name_ref),
         PrefixExpr(prefix_op),
@@ -407,10 +400,13 @@ mod grammar {
         Group(group),
         Block(block),
         Return(return_),
+        Break(break_),
+        Continue(continue_),
         CallExpr(call_expr),
         IndexExpr(index_expr),
         IfExpr(if_expr),
         LoopExpr(loop_expr),
+        WhileExpr(while_expr),
     });
 
     decl_node!(struct Literal: LITERAL {
@@ -439,13 +435,19 @@ mod grammar {
     });
     decl_node!(struct Block: BLOCK_EXPR {
         (l_curly : Token   <LeftCurly >)
-        (items   : NodeList<0, Item   >)
+        (items   : NodeList<Item      >)
         (expr    : Node    <Expr      >)
         (r_curly : Token   <RightCurly>)
     });
     decl_node!(struct Return: RETURN_EXPR {
         (return_kw : Token<ReturnKw>)
         (expr      : Node <Expr    >)
+    });
+    decl_node!(struct Break: BREAK_EXPR {
+        (break_kw  : Token<BreakKw>)
+    });
+    decl_node!(struct Continue: CONTINUE_EXPR {
+        (continue_kw  : Token<ContinueKw>)
     });
     decl_node!(struct CallExpr: CALL_EXPR {
         (receiver  : NthNode <0, Expr   >)
@@ -454,10 +456,10 @@ mod grammar {
         (r_paren   : Token   <RightParen>)
     });
     decl_node!(struct IndexExpr: INDEX_EXPR {
-        (receiver : NthNode<0, Expr   >)
-        (l_paren  : Token  <LeftParen >)
-        (index    : NthNode<1, Expr   >)
-        (r_paren  : Token  <RightParen>)
+        (receiver : NthNode <0, Expr   >)
+        (l_paren  : Token   <LeftParen >)
+        (index    : NthNode <1, Expr   >)
+        (r_paren  : Token   <RightParen>)
     });
     decl_node!(struct IfExpr: IF_EXPR {
         (if_kw     : Token   <IfKw    >)
@@ -470,6 +472,43 @@ mod grammar {
         (loop_kw   : Token <LoopKw>)
         (body      : Node  <Block >)
     });
+    decl_node!(struct WhileExpr: WHILE_EXPR {
+        (while_kw   : Token <WhileKw>)
+        (condition  : Node  <Expr>)
+        (body       : Node  <Block >)
+    });
+
+    decl_token_enum!(enum PrefixOp {
+        Plus(plus),
+        Minus(minus),
+    });
+
+    decl_token_enum!(enum BinOp {
+        Plus(plus),
+        Minus(minus),
+        Star(star),
+        Dot(dot),
+        Gt(gt),
+        Lt(lt),
+        Eq(eq),
+        Lte(lte),
+        Gte(gte),
+        And(and),
+        Assign(assign),
+    });
+
+    decl_token!(struct Plus       : T![+]);
+    decl_token!(struct Minus      : T![-]);
+    decl_token!(struct Star       : T![*]);
+    decl_token!(struct Slash      : T![/]);
+    decl_token!(struct Dot        : T![.]);
+    decl_token!(struct Gt         : T![>]);
+    decl_token!(struct Lt         : T![<]);
+    decl_token!(struct Eq         : T![==]);
+    decl_token!(struct Lte        : T![>=]);
+    decl_token!(struct Gte        : T![<=]);
+    decl_token!(struct And        : T![&&]);
+    decl_token!(struct Assign     : T![=]);
 
     decl_token!(struct Ident      : IDENT);
     decl_token!(struct Number     : NUMBER);
@@ -488,25 +527,12 @@ mod grammar {
     decl_token!(struct FnKw       : T![fn]);
     decl_token!(struct LetKw      : T![let]);
     decl_token!(struct ReturnKw   : T![return]);
+    decl_token!(struct BreakKw    : T![break]);
+    decl_token!(struct ContinueKw : T![continue]);
     decl_token!(struct IfKw       : T![if]);
     decl_token!(struct ElseKw     : T![else]);
     decl_token!(struct LoopKw     : T![loop]);
-    decl_token!(struct BinOp      : T![+]
-                                  | T![-]
-                                  | T![*]
-                                  | T![/]
-                                  | T![.]
-                                  | T![>]
-                                  | T![<]
-                                  | T![==]
-                                  | T![>=]
-                                  | T![<=]
-                                  | T![&&]
-                                  | T![=]
-    );
-    decl_token!(struct PrefixOp   : T![+]
-                                  | T![-]
-    );
+    decl_token!(struct WhileKw    : T![while]);
 }
 
 pub use grammar::*;
@@ -528,6 +554,11 @@ mod tests {
 
     fn check_module(s: &str, expected: Expect) {
         let expr = Module::cast(parse_with_entry(s, EntryPoint::Module)).unwrap();
+        expected.assert_eq(&expr.to_string());
+    }
+
+    fn check_block(s: &str, expected: Expect) {
+        let expr = Expr::cast(parse_with_entry(s, EntryPoint::Block)).unwrap();
         expected.assert_eq(&expr.to_string());
     }
 
@@ -609,6 +640,58 @@ fn bar() {}
                       Number: 10
                     SemiColon: ;"#]],
         );
+    }
+
+    #[test]
+    fn multiple_lets() {
+        check_block(
+            r#"{
+    if n <= 1 {
+        return n
+    }
+    let j: i32 = n - 2;
+    n
+}"#,
+            expect![[r#"
+                Block:
+                  LeftCurly: {
+                  Let:
+                    LetKw: let
+                    Name:
+                      Ident: j
+                    Colon: :
+                    BasicType:
+                      Ident: i32
+                    Equals: =
+                    BinExpr:
+                      NameRef:
+                        Ident: n
+                      Minus: -
+                      Literal:
+                        Number: 2
+                    SemiColon: ;
+                  IfExpr:
+                    IfKw: if
+                    BinExpr:
+                      NameRef:
+                        Ident: n
+                      Gte: <=
+                      Literal:
+                        Number: 1
+                    Block:
+                      LeftCurly: {
+                      Return:
+                        ReturnKw: return
+                        NameRef:
+                          Ident: n
+                      RightCurly: }
+                    ElseKw: None
+                    Block: None
+                  BinExpr:
+                    NameRef:
+                      Ident: n
+                  RightCurly: }"#]],
+        )
     }
 
     #[test]
@@ -745,12 +828,12 @@ fn bar() {}
         check_expr(
             "10 + 10",
             expect![[r#"
-            BinExpr:
-              Literal:
-                Number: 10
-              BinOp: +
-              Literal:
-                Number: 10"#]],
+                BinExpr:
+                  Literal:
+                    Number: 10
+                  Plus: +
+                  Literal:
+                    Number: 10"#]],
         );
     }
 
@@ -759,10 +842,10 @@ fn bar() {}
         check_expr(
             "-10",
             expect![[r#"
-            PrefixExpr:
-              PrefixOp: -
-              Literal:
-                Number: 10"#]],
+                PrefixExpr:
+                  Minus: -
+                  Literal:
+                    Number: 10"#]],
         );
     }
 
@@ -784,15 +867,15 @@ fn bar() {}
         check_module(
             "10 + 10;",
             expect![[r#"
-            Module:
-              ExprItem:
-                BinExpr:
-                  Literal:
-                    Number: 10
-                  BinOp: +
-                  Literal:
-                    Number: 10
-                SemiColon: ;"#]],
+                Module:
+                  ExprItem:
+                    BinExpr:
+                      Literal:
+                        Number: 10
+                      Plus: +
+                      Literal:
+                        Number: 10
+                    SemiColon: ;"#]],
         );
     }
 }

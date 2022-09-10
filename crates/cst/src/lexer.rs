@@ -1,6 +1,8 @@
 use crate::hash::hash;
 use crate::{green, SyntaxKind};
 use std::collections::HashMap;
+use std::iter::Peekable;
+use std::str::Chars;
 use std::sync::Arc;
 
 pub type Token = Arc<green::Token>;
@@ -8,7 +10,7 @@ pub type TokenCache = HashMap<(SyntaxKind, u64), Token>;
 
 pub struct Lexer<'source> {
     offset: usize,
-    input: &'source str,
+    chars: Peekable<Chars<'source>>,
     pub(crate) token_cache: TokenCache,
 }
 
@@ -32,7 +34,7 @@ impl<'source> Lexer<'source> {
     pub fn new(input: &'source str) -> Self {
         Self {
             offset: 0,
-            input,
+            chars: input.chars().peekable(),
             token_cache: Default::default(),
         }
     }
@@ -42,7 +44,7 @@ impl Lexer<'_> {
     pub fn lex_one(&mut self) -> Token {
         let token = match self.peek() {
             Some(token) => token,
-            None => return self.token(SyntaxKind::EOF, ""),
+            None => return self.token(SyntaxKind::EOF, "".to_string()),
         };
         match token {
             '(' => self.single(green::SyntaxKind::LEFT_PAREN),
@@ -60,11 +62,18 @@ impl Lexer<'_> {
             '-' => self.single(green::SyntaxKind::DASH),
             '+' => self.single(green::SyntaxKind::PLUS),
             '*' => self.single(green::SyntaxKind::STAR),
-            '/' => self.single(green::SyntaxKind::SLASH),
             '.' => self.single(green::SyntaxKind::DOT),
             '&' => self.single(green::SyntaxKind::AMPERSAND),
             '|' => self.single(green::SyntaxKind::BAR),
             '"' => self.string(),
+            '/' => {
+                self.advance();
+                if self.peek() == Some('/') {
+                    self.comment()
+                } else {
+                    self.token(green::SyntaxKind::SLASH, "/".to_string())
+                }
+            }
             start_ident!() => self.ident_or_keyword(),
             number!() => self.number(),
             whitespace!() => self.whitespace(),
@@ -72,63 +81,50 @@ impl Lexer<'_> {
         }
     }
 
-    fn at(&self, offset: usize) -> Option<char> {
-        self.input.chars().nth(offset)
+    fn peek(&mut self) -> Option<char> {
+        self.chars.peek().copied()
     }
 
-    fn peek(&self) -> Option<char> {
-        self.at(self.offset)
-    }
-
-    fn advance(&mut self) {
+    fn advance(&mut self) -> Option<char> {
+        let c = self.chars.next();
         self.offset += 1;
+        c
     }
 
-    fn advance_to(&mut self, offset: usize) {
-        self.offset = offset;
-    }
-
-    fn token(&mut self, kind: SyntaxKind, text: &str) -> Token {
+    fn token(&mut self, kind: SyntaxKind, text: String) -> Token {
         self.token_cache
-            .entry((kind, hash(text)))
-            .or_insert_with(|| {
-                Arc::new(green::Token {
-                    kind,
-                    text: text.to_string(),
-                })
-            })
+            .entry((kind, hash(&text)))
+            .or_insert_with(|| Arc::new(green::Token { kind, text }))
             .clone()
     }
 
     fn single(&mut self, kind: green::SyntaxKind) -> Token {
-        let (start, end) = (self.offset, self.offset + 1);
-        self.advance();
-        self.token(kind, &self.input[start..end])
+        let c = self.advance().unwrap();
+        self.token(kind, c.to_string())
     }
 
-    fn matching_range(&mut self, accept: impl Fn(char) -> bool) -> (usize, usize) {
-        let (start, mut end) = (self.offset, self.offset);
-        while let Some(c) = self.at(end) {
+    fn matching_range(&mut self, accept: impl Fn(char) -> bool) -> String {
+        let mut ret = String::new();
+        while let Some(c) = self.peek() {
             if accept(c) {
-                end += 1;
+                ret.push(self.advance().unwrap());
             } else {
                 break;
             }
         }
-        self.advance_to(end);
-        (start, end)
+        ret
     }
 
     fn lex_kind(&mut self, kind: green::SyntaxKind, accept: impl Fn(char) -> bool) -> Token {
-        let (start, end) = self.matching_range(accept);
-        self.token(kind, &self.input[start..end])
+        let text = self.matching_range(accept);
+        self.token(kind, text)
     }
 
     fn ident_or_keyword(&mut self) -> Token {
-        let (start, _) = self.matching_range(is_start_ident);
-        let (_, end) = self.matching_range(is_ident);
-        let text = &self.input[start..end];
-        let kind = match text {
+        let start = self.matching_range(is_start_ident);
+        let end = self.matching_range(is_ident);
+        let text = format!("{start}{end}");
+        let kind = match text.as_str() {
             "type" => SyntaxKind::TYPE_KW,
             "fn" => SyntaxKind::FN_KW,
             "let" => SyntaxKind::LET_KW,
@@ -136,7 +132,9 @@ impl Lexer<'_> {
             "if" => SyntaxKind::IF_KW,
             "else" => SyntaxKind::ELSE_KW,
             "loop" => SyntaxKind::LOOP_KW,
-            "break" => SyntaxKind::LOOP_KW,
+            "while" => SyntaxKind::WHILE_KW,
+            "break" => SyntaxKind::BREAK_KW,
+            "continue" => SyntaxKind::CONTINUE_KW,
             _ => SyntaxKind::IDENT,
         };
         self.token(kind, text)
@@ -151,17 +149,21 @@ impl Lexer<'_> {
     }
 
     fn string(&mut self) -> Token {
-        let start = self.offset;
-        self.advance();
-        let (_, mut end) = self.matching_range(|c| c != '"');
+        let start = self.advance().unwrap();
+        let mut end = self.matching_range(|c| c != '"');
         let kind = if let Some('"') = self.peek() {
-            end += 1;
+            end.push(self.advance().unwrap());
             SyntaxKind::STRING
         } else {
             SyntaxKind::ERROR
         };
-        self.advance_to(end);
-        self.token(kind, &self.input[start..end])
+        self.token(kind, format!("{start}{end}"))
+    }
+
+    fn comment(&mut self) -> Token {
+        self.advance().unwrap();
+        let contents = self.matching_range(|c| c != '\n');
+        self.token(SyntaxKind::COMMENT, format!("//{contents}"))
     }
 }
 
@@ -247,7 +249,7 @@ mod tests {
 
     #[test]
     fn keywords() {
-        let mut lexer = Lexer::new("type let fn return if else loop");
+        let mut lexer = Lexer::new("type let fn return if else loop while break continue");
         assert_token!(lexer, TYPE_KW, "type");
         assert_token!(lexer, WHITESPACE, " ");
         assert_token!(lexer, LET_KW, "let");
@@ -262,7 +264,11 @@ mod tests {
         assert_token!(lexer, WHITESPACE, " ");
         assert_token!(lexer, LOOP_KW, "loop");
         assert_token!(lexer, WHITESPACE, " ");
+        assert_token!(lexer, WHILE_KW, "while");
+        assert_token!(lexer, WHITESPACE, " ");
         assert_token!(lexer, BREAK_KW, "break");
+        assert_token!(lexer, WHITESPACE, " ");
+        assert_token!(lexer, CONTINUE_KW, "continue");
         assert_done!(lexer);
     }
 

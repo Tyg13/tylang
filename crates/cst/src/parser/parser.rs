@@ -92,7 +92,6 @@ impl<'tokens> Parser<'tokens> {
     }
 
     pub fn start_node(&mut self) -> Marker {
-        self.advance_to_next_non_trivia();
         let index = self.events.len();
         self.events.push(Event::tombstone());
         Marker { index }

@@ -1,9 +1,3 @@
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub enum Element<Node, Token> {
-    Node(Node),
-    Token(Token),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
     pub offset: usize,
