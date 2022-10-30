@@ -55,6 +55,7 @@ pub enum SyntaxKind {
     RIGHT_ANGLE_EQUALS,
     EQUALS_EQUALS,
     DASH_ARROW,
+    COLON_COLON,
 
     DOT_DOT_DOT,
 
@@ -67,12 +68,14 @@ pub enum SyntaxKind {
     RETURN_EXPR,
     CALL_EXPR,
     INDEX_EXPR,
+    AS_EXPR,
     IF_EXPR,
     LOOP_EXPR,
     WHILE_EXPR,
     BREAK_EXPR,
     CONTINUE_EXPR,
 
+    MOD_KW,
     TYPE_KW,
     FN_KW,
     LET_KW,
@@ -83,6 +86,7 @@ pub enum SyntaxKind {
     WHILE_KW,
     BREAK_KW,
     CONTINUE_KW,
+    AS_KW,
 }
 use SyntaxKind::*;
 
@@ -117,14 +121,16 @@ impl SyntaxKind {
             RIGHT_ANGLE_EQUALS => Subtokens::Two(RIGHT_ANGLE, EQUALS),
             BAR_BAR => Subtokens::Two(BAR, BAR),
             DASH_ARROW => Subtokens::Two(DASH, RIGHT_ANGLE),
+            COLON_COLON => Subtokens::Two(COLON, COLON),
             DOT_DOT_DOT => Subtokens::Three(DOT, DOT, DOT),
             token => Subtokens::One(token),
         }
     }
     pub fn terminated_by_semicolon(&self) -> bool {
         match *self {
-            LITERAL | NAME_REF | PREFIX_EXPR | BIN_EXPR | PAREN_EXPR | BLOCK_EXPR | RETURN_EXPR
-            | INDEX_EXPR | CALL_EXPR | BREAK_EXPR | CONTINUE_EXPR => true,
+            LITERAL | NAME_REF | PREFIX_EXPR | BIN_EXPR | PAREN_EXPR
+            | BLOCK_EXPR | RETURN_EXPR | INDEX_EXPR | CALL_EXPR
+            | BREAK_EXPR | CONTINUE_EXPR => true,
             IF_EXPR | LOOP_EXPR | WHILE_EXPR => false,
             _ => unreachable!(),
         }
@@ -132,17 +138,18 @@ impl SyntaxKind {
 
     pub fn is_operator(&self) -> bool {
         match *self {
-            LEFT_ANGLE | RIGHT_ANGLE | AMPERSAND | EQUALS | BAR | DASH | PLUS | STAR | SLASH
-            | DOT | AMPERSAND_AMPERSAND | BAR_BAR | LEFT_ANGLE_EQUALS | RIGHT_ANGLE_EQUALS
-            | EQUALS_EQUALS | DASH_ARROW | DOT_DOT_DOT => true,
+            LEFT_ANGLE | RIGHT_ANGLE | AMPERSAND | EQUALS | BAR | DASH
+            | PLUS | STAR | SLASH | DOT | AMPERSAND_AMPERSAND | BAR_BAR
+            | LEFT_ANGLE_EQUALS | RIGHT_ANGLE_EQUALS | EQUALS_EQUALS
+            | COLON_COLON | DASH_ARROW | DOT_DOT_DOT => true,
             _ => false,
         }
     }
 
     pub fn is_keyword(&self) -> bool {
         match *self {
-            TYPE_KW | FN_KW | LET_KW | RETURN_KW | IF_KW | ELSE_KW | LOOP_KW | WHILE_KW
-            | BREAK_KW | CONTINUE_KW => true,
+            MOD_KW | TYPE_KW | FN_KW | LET_KW | RETURN_KW | IF_KW | ELSE_KW
+            | LOOP_KW | WHILE_KW | BREAK_KW | CONTINUE_KW | AS_KW => true,
             _ => false,
         }
     }
@@ -225,8 +232,14 @@ macro_rules! T {
     (->) => {
         crate::SyntaxKind::DASH_ARROW
     };
+    (::) => {
+        crate::SyntaxKind::COLON_COLON
+    };
     (...) => {
         crate::SyntaxKind::DOT_DOT_DOT
+    };
+    (mod) => {
+        crate::SyntaxKind::MOD_KW
     };
     (type) => {
         crate::SyntaxKind::TYPE_KW
@@ -257,5 +270,8 @@ macro_rules! T {
     };
     (continue) => {
         crate::SyntaxKind::CONTINUE_KW
+    };
+    (as) => {
+        crate::SyntaxKind::AS_KW
     };
 }

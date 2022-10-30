@@ -1,3 +1,5 @@
+#![feature(assert_matches)]
+
 mod builder;
 pub use builder::Builder;
 
@@ -9,5 +11,3 @@ pub use translate::translate;
 
 mod printers;
 pub use printers::print;
-
-mod utils;

@@ -1,9 +1,6 @@
 pub mod types;
 pub use types::*;
 
-pub mod id;
-pub use id::{ID, NONE};
-
 pub mod build;
 pub use build::Builder;
 

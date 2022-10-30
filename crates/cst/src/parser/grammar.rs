@@ -14,7 +14,7 @@ pub enum EntryPoint {
 pub(super) fn entry_point(parser: &mut Parser<'_>, entry: EntryPoint) {
     match entry {
         EntryPoint::Module => {
-            module(parser);
+            module(parser, false);
         }
         EntryPoint::Block => {
             expressions::block(parser);
@@ -25,16 +25,26 @@ pub(super) fn entry_point(parser: &mut Parser<'_>, entry: EntryPoint) {
     }
 }
 
-fn module(parser: &mut Parser<'_>) {
+fn module(parser: &mut Parser<'_>, inner_module: bool) {
     let m = parser.start_node();
+    if inner_module {
+        parser.expect_token(T![mod]);
+        parser.expect_token(IDENT);
+        parser.expect_token(T!['{']);
+    }
     loop {
         match parser.advance_to_next_non_trivia() {
+            T![mod] => module(parser, true),
             T![let] => items::let_item(parser),
             T![fn] => items::fn_item(parser),
             T![type] => items::type_item(parser),
+            T!['}'] if inner_module => break,
             EOF => break,
             _ => items::expr_item(parser),
         }
+    }
+    if inner_module {
+        parser.expect_token(T!['}']);
     }
     m.complete(parser, MODULE);
 }
@@ -71,7 +81,9 @@ fn param_list(parser: &mut Parser<'_>) {
                 match parser.advance_to_next_non_trivia() {
                     T![')'] | EOF => break,
                     T![.] => {
-                        parser.node(VA_PARAM, |parser| parser.expect_token(T![...]));
+                        parser.node(VA_PARAM, |parser| {
+                            parser.expect_token(T![...])
+                        });
                         break;
                     }
                     _ => {

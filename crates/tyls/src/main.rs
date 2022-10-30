@@ -14,7 +14,10 @@ fn start_logging() {
     simple_logging::log_to_file(log_name, log::LevelFilter::Debug).unwrap();
 }
 
-fn notify<N: lsp_types::notification::Notification>(sender: &Sender<Message>, params: N::Params) {
+fn notify<N: lsp_types::notification::Notification>(
+    sender: &Sender<Message>,
+    params: N::Params,
+) {
     sender
         .send(Message::Notification(lsp_server::Notification::new(
             N::METHOD.to_string(),
@@ -29,22 +32,26 @@ fn parse_module(text: &str) -> cst::syntax::Node {
 
 fn server_caps() -> ServerCapabilities {
     let mut server_caps = ServerCapabilities::default();
-    server_caps.text_document_sync = Some(lsp_types::TextDocumentSyncCapability::Options({
-        let mut options = lsp_types::TextDocumentSyncOptions::default();
-        options.open_close = Some(true);
-        options.change = Some(lsp_types::TextDocumentSyncKind::FULL);
-        options
-    }));
+    server_caps.text_document_sync =
+        Some(lsp_types::TextDocumentSyncCapability::Options({
+            let mut options = lsp_types::TextDocumentSyncOptions::default();
+            options.open_close = Some(true);
+            options.change = Some(lsp_types::TextDocumentSyncKind::FULL);
+            options
+        }));
     server_caps.semantic_tokens_provider = Some(
         lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions({
             let mut options = lsp_types::SemanticTokensOptions::default();
             options.legend = lsp_types::SemanticTokensLegend::default();
-            options.legend.token_types = semantic_tokens::legend().types().clone();
-            options.full = Some(lsp_types::SemanticTokensFullOptions::Bool(true));
+            options.legend.token_types =
+                semantic_tokens::legend().types().clone();
+            options.full =
+                Some(lsp_types::SemanticTokensFullOptions::Bool(true));
             options
         }),
     );
-    server_caps.hover_provider = Some(lsp_types::HoverProviderCapability::Simple(true));
+    server_caps.hover_provider =
+        Some(lsp_types::HoverProviderCapability::Simple(true));
     server_caps
 }
 
@@ -101,7 +108,10 @@ fn compute_semantic_tokens(info: &ModuleInfo) -> Vec<lsp_types::SemanticToken> {
 
         let mut collector = TokenCollector::default();
         collector.deltas.push((0, 0));
-        cst::syntax::traverse::preorder(&mut collector, info.syntax.clone().as_node_or_token());
+        cst::syntax::traverse::preorder(
+            &mut collector,
+            info.syntax.clone().as_node_or_token(),
+        );
         assert_eq!(collector.deltas.len(), collector.tokens.len() + 1);
         (collector.tokens, collector.deltas)
     };
@@ -131,25 +141,34 @@ fn compute_semantic_tokens(info: &ModuleInfo) -> Vec<lsp_types::SemanticToken> {
                 },
                 NAME_REF => {
                     let parent = token.parent.clone();
-                    let mut might_be_method = false;
-                    let mut grandparent = parent.parent().unwrap();
-                    if grandparent.kind() != CALL_EXPR && grandparent.kind() == BIN_EXPR {
-                        might_be_method = true;
-                        grandparent = match grandparent.parent() {
-                            Some(ancestor) => ancestor,
-                            None => break,
+                    let grandparent = parent.parent().unwrap();
+                    match (parent.index, grandparent.kind()) {
+                        (0, CALL_EXPR) => {
+                            lsp_types::SemanticTokenType::FUNCTION
                         }
-                    }
-                    match (parent.index, might_be_method, grandparent.kind()) {
-                        // 0-th arg in a call expr (e.g. `foo` in `foo(a, b)`)
-                        (0, false, CALL_EXPR) => lsp_types::SemanticTokenType::FUNCTION,
-                        (2, true, CALL_EXPR) => lsp_types::SemanticTokenType::FUNCTION,
+                        (0, BIN_EXPR) => {
+                            if grandparent.child(1).kind() == COLON_COLON {
+                                lsp_types::SemanticTokenType::NAMESPACE
+                            } else {
+                                continue;
+                            }
+                        }
+                        (2, BIN_EXPR) => {
+                            if grandparent.parent().unwrap().kind() == CALL_EXPR
+                            {
+                                lsp_types::SemanticTokenType::FUNCTION
+                            } else {
+                                continue;
+                            }
+                        }
                         _ => continue,
                     }
                 }
                 _ => continue,
             },
-            kind if kind.is_operator() => lsp_types::SemanticTokenType::OPERATOR,
+            kind if kind.is_operator() => {
+                lsp_types::SemanticTokenType::OPERATOR
+            }
             kind if kind.is_keyword() => lsp_types::SemanticTokenType::KEYWORD,
             _ => continue,
         };
@@ -178,15 +197,17 @@ fn find_syntax_tree_at_position(
 
     use cst::syntax::traverse::Step;
 
-    let node_at_cursor =
-        cst::syntax::traverse::iterate(info.syntax.clone().as_node_or_token(), |node| {
+    let node_at_cursor = cst::syntax::traverse::iterate(
+        info.syntax.clone().as_node_or_token(),
+        |node| {
             for child in node.children_with_tokens() {
                 if child.range().contains(&offset) {
                     return Step::Continue(child.clone());
                 }
             }
             Step::Terminate(node)
-        });
+        },
+    );
 
     let repr = |node: &cst::syntax::NodeOrToken| -> String {
         format!("{}: {:?}", node.index(), node.kind())
@@ -287,7 +308,6 @@ fn main() {
         });
         let receiver_thread = s.spawn(|_| {
             let mut modules: HashMap<String, ModuleInfo> = HashMap::new();
-            let legend = semantic_tokens::legend();
             loop {
                 let msg = conn.receiver.recv().unwrap();
                 log::debug!("{msg:?}");

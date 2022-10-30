@@ -7,7 +7,7 @@ pub struct Parser<'tokens> {
     token_index: usize,
     events: Vec<Event>,
     follow_stack: Vec<HashSet<SyntaxKind>>,
-    steps: usize,
+    steps: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +30,11 @@ pub struct Marker {
 }
 
 impl Marker {
-    pub fn complete(self, parser: &mut Parser<'_>, kind: SyntaxKind) -> CompletedMarker {
+    pub fn complete(
+        self,
+        parser: &mut Parser<'_>,
+        kind: SyntaxKind,
+    ) -> CompletedMarker {
         let index = self.index;
         match &mut parser.events[index] {
             event @ Event::NodeStart(TOMBSTONE, None) => {
@@ -153,7 +157,11 @@ impl<'tokens> Parser<'tokens> {
         self.peek()
     }
 
-    pub fn with_follow_set(&mut self, kinds: &[SyntaxKind], action: impl FnOnce(&mut Self) -> ()) {
+    pub fn with_follow_set(
+        &mut self,
+        kinds: &[SyntaxKind],
+        action: impl FnOnce(&mut Self) -> (),
+    ) {
         self.follow_stack.push(Default::default());
         self.add_to_follow_set(kinds);
         action(self);
@@ -174,9 +182,12 @@ impl<'tokens> Parser<'tokens> {
     pub fn at(&self, kind: SyntaxKind) -> bool {
         match kind.subtokens() {
             Subtokens::One(t1) => self.lookahead(0) == t1,
-            Subtokens::Two(t1, t2) => (self.lookahead(0), self.lookahead(1)) == (t1, t2),
+            Subtokens::Two(t1, t2) => {
+                (self.lookahead(0), self.lookahead(1)) == (t1, t2)
+            }
             Subtokens::Three(t1, t2, t3) => {
-                (self.lookahead(0), self.lookahead(1), self.lookahead(2)) == (t1, t2, t3)
+                (self.lookahead(0), self.lookahead(1), self.lookahead(2))
+                    == (t1, t2, t3)
             }
         }
     }
@@ -200,9 +211,9 @@ impl<'tokens> Parser<'tokens> {
 impl Parser<'_> {
     fn step(&mut self) {
         self.steps = self.steps.saturating_add(1);
-        //if self.steps >= 10000 {
-        //    panic!("parser might be stuck");
-        //}
+        if self.steps >= 1000000 {
+            panic!("parser might be stuck");
+        }
     }
 
     fn finish_node(&mut self) {

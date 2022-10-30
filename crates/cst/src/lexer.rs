@@ -115,7 +115,11 @@ impl Lexer<'_> {
         ret
     }
 
-    fn lex_kind(&mut self, kind: green::SyntaxKind, accept: impl Fn(char) -> bool) -> Token {
+    fn lex_kind(
+        &mut self,
+        kind: green::SyntaxKind,
+        accept: impl Fn(char) -> bool,
+    ) -> Token {
         let text = self.matching_range(accept);
         self.token(kind, text)
     }
@@ -125,6 +129,7 @@ impl Lexer<'_> {
         let end = self.matching_range(is_ident);
         let text = format!("{start}{end}");
         let kind = match text.as_str() {
+            "mod" => SyntaxKind::MOD_KW,
             "type" => SyntaxKind::TYPE_KW,
             "fn" => SyntaxKind::FN_KW,
             "let" => SyntaxKind::LET_KW,
@@ -135,6 +140,7 @@ impl Lexer<'_> {
             "while" => SyntaxKind::WHILE_KW,
             "break" => SyntaxKind::BREAK_KW,
             "continue" => SyntaxKind::CONTINUE_KW,
+            "as" => SyntaxKind::AS_KW,
             _ => SyntaxKind::IDENT,
         };
         self.token(kind, text)
@@ -249,7 +255,11 @@ mod tests {
 
     #[test]
     fn keywords() {
-        let mut lexer = Lexer::new("type let fn return if else loop while break continue");
+        let mut lexer = Lexer::new(
+            "mod type let fn return if else loop while break continue as",
+        );
+        assert_token!(lexer, MOD_KW, "mod");
+        assert_token!(lexer, WHITESPACE, " ");
         assert_token!(lexer, TYPE_KW, "type");
         assert_token!(lexer, WHITESPACE, " ");
         assert_token!(lexer, LET_KW, "let");
@@ -269,6 +279,8 @@ mod tests {
         assert_token!(lexer, BREAK_KW, "break");
         assert_token!(lexer, WHITESPACE, " ");
         assert_token!(lexer, CONTINUE_KW, "continue");
+        assert_token!(lexer, WHITESPACE, " ");
+        assert_token!(lexer, AS_KW, "as");
         assert_done!(lexer);
     }
 

@@ -60,6 +60,10 @@ mod tests {
     }
 
     pub fn check_expr(input: &str, expected: expect_test::Expect) {
-        check_from_entry(input.trim(), expected, grammar::EntryPoint::Expression);
+        check_from_entry(
+            input.trim(),
+            expected,
+            grammar::EntryPoint::Expression,
+        );
     }
 }

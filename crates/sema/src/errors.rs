@@ -11,6 +11,7 @@ pub enum ErrorKind {
     DuplicateType,
     DuplicateBinding,
     UnknownCall,
+    CallToNonFnType,
     Unification,
     InvalidIndexType,
     InvalidPointeeType,

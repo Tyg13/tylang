@@ -88,7 +88,9 @@ impl Node {
             children = self
                 .children
                 .iter()
-                .map(|child| { format!("\n{}", child.to_string_indented(indent + 2)) })
+                .map(|child| {
+                    format!("\n{}", child.to_string_indented(indent + 2))
+                })
                 .collect::<String>()
         )
     }

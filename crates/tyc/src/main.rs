@@ -1,9 +1,9 @@
-use clap::{clap_app, AppSettings};
+#![feature(assert_matches)]
+
+use clap::Parser;
 use std::fs;
 
 use ast::Node;
-
-mod codegen;
 
 #[derive(Debug)]
 enum Error {
@@ -16,32 +16,36 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ReadingInput(err) => write!(f, "reading input: {err}"),
-            Self::UnknownAction(action) => write!(f, "unknown action: {action}"),
+            Self::UnknownAction(action) => {
+                write!(f, "unknown action: {action}")
+            }
             Self::SemanticErrors(n) => write!(f, "{n} semantic errors"),
         }
     }
 }
 
+#[derive(Parser, Debug)]
+#[clap(author = "Tyler Lanphear", version = "0.1", about = "tylang compiler")]
+struct Args {
+    input: String,
+    #[clap(short, long)]
+    action: Option<String>,
+    #[clap(short, long)]
+    output_path: Option<String>,
+    #[clap(long)]
+    optimize: bool,
+    #[clap(short, long)]
+    quiet: bool,
+}
+
 fn main() -> () {
     env_logger::init();
     || -> Result<(), Error> {
-        let matches = clap_app!(tylang =>
-            (version: "0.1")
-            (author: "Tyler Lanphear")
-            (@arg INPUT: +required "Input source file")
-            (@arg ACTION: -a --action +takes_value "Action to take on input file")
-            (@arg OPTIMIZE: -O --optimize "Whether to optimize output")
-            (@arg QUIET: -q --quiet "Whether to suppress output (if applicable)")
-        )
-        .setting(AppSettings::ArgRequiredElseHelp)
-        .get_matches();
-        let action = matches.value_of("ACTION");
-        let input_path = matches.value_of("INPUT").unwrap();
-        let optimize = matches.is_present("OPTIMIZE");
-        let quiet = matches.is_present("QUIET");
+        let args = Args::parse();
+        let action = args.action.as_deref();
 
-        let module_string = read_source(input_path)?;
-        let module_source = utils::Source::read_path(input_path);
+        let module_string = read_source(&args.input)?;
+        let module_source = utils::Source::read_path(&args.input);
 
         if let Some("none") = action {
             return Ok(());
@@ -55,7 +59,7 @@ fn main() -> () {
 
         let module_lexed = cst::parser::Input::lex(&module_string);
         if let Some("tokens") = action {
-            if !quiet {
+            if !args.quiet {
                 println!("{:#?}", module_lexed.tokens());
             }
             return Ok(());
@@ -63,16 +67,17 @@ fn main() -> () {
 
         let module_cst = cst::parser::parse(module_lexed);
         if !module_cst.errors.is_empty() {
-            if !quiet {
+            if !args.quiet {
                 for error in module_cst.errors {
-                    let error = module_ctx.pos_ctx_with_label(error.pos.offset, &error.msg);
+                    let error = module_ctx
+                        .pos_ctx_with_label(error.pos.offset, &error.msg);
                     eprintln!("{error}");
                 }
             }
             return Ok(());
         }
         if let Some("cst") = action {
-            if !quiet {
+            if !args.quiet {
                 pretty_print(&module_cst);
             }
             return Ok(());
@@ -80,7 +85,7 @@ fn main() -> () {
 
         let module_ast = ast::Module::cast(module_cst.root.clone()).unwrap();
         if let Some("ast") = action {
-            if !quiet {
+            if !args.quiet {
                 println!("{}", module_ast);
             }
             return Ok(());
@@ -88,8 +93,7 @@ fn main() -> () {
 
         let module_bir = bir::translate::ast(&module_ast);
         if let Some("bir") = action {
-            if !quiet {
-                eprintln!("{module_bir:#?}");
+            if !args.quiet {
                 bir::print(&module_bir);
             }
             return Ok(());
@@ -100,22 +104,30 @@ fn main() -> () {
         module_ctx.sema = Some(&module_sema);
 
         if let Some("sema") = action {
-            if !quiet {
+            if !args.quiet {
                 let map = &module_sema;
                 for (id, kind) in map.nodes() {
-                    let label = match kind {
-                        sema::Kind::Type => map.ty(id).unwrap().repr(map),
-                        sema::Kind::Module => continue,
-                        sema::Kind::Function => continue,
-                        sema::Kind::Param => continue,
-                        sema::Kind::Var => continue,
-                        sema::Kind::Block => continue,
-                        sema::Kind::Error => continue,
-                        sema::Kind::Constant => map.ty(id).unwrap().repr(map),
-                        sema::Kind::Other => map.ty(id).unwrap().repr(map),
-                        sema::Kind::Tombstone => continue,
+                    let repr = match kind {
+                        sema::Kind::Module
+                        | sema::Kind::Block
+                        | sema::Kind::Error => continue,
+                        sema::Kind::Type
+                        | sema::Kind::Function
+                        | sema::Kind::Param
+                        | sema::Kind::Var
+                        | sema::Kind::Constant
+                        | sema::Kind::TypeMember
+                        | sema::Kind::Expr => match map.ty(id) {
+                            Some(ty) => ty.repr(map),
+                            None => continue,
+                        },
+                        sema::Kind::Tombstone => unreachable!(),
                     };
-                    println!("{}\n", module_ctx.sema_ctx_with_label(&id, &label));
+                    let label = format!("{repr} {:?}", id);
+                    println!(
+                        "{}\n",
+                        module_ctx.sema_ctx_with_label(&id, &label)
+                    );
                 }
             }
             report_sema_errs(&module_sema, &module_ctx);
@@ -129,7 +141,7 @@ fn main() -> () {
 
         let module_lir = lir::translate(&module_bir, &module_sema);
         if let Some("lir") = action {
-            lir::print(&module_sema, &module_lir);
+            lir::print(&module_lir);
             return Ok(());
         }
 
@@ -138,12 +150,23 @@ fn main() -> () {
             Some("llvm-ir") => codegen::Action::WriteIr,
             Some("asm") => codegen::Action::WriteAssembly,
             Some("obj") => codegen::Action::WriteObject,
-            Some(action) => return Err(Error::UnknownAction(action.to_string())),
+            Some(action) => {
+                return Err(Error::UnknownAction(action.to_string()));
+            }
         };
-        codegen::compile(&module_lir, &module_sema, input_path, action, optimize);
+        codegen::compile(
+            &module_lir,
+            &args.input,
+            args.output_path.as_deref(),
+            action,
+            args.optimize,
+        );
         Ok(())
     }()
-    .unwrap_or_else(|e| eprintln!("error: {e}"));
+    .unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1)
+    });
 }
 
 fn report_sema_errs(module_sema: &sema::Map, module_ctx: &ModuleCtx) -> usize {
@@ -162,23 +185,38 @@ fn report_sema_err(ctx: &ModuleCtx, err: &sema::errors::Error) {
         match err.kind {
             ErrorKind::DuplicateBinding => {
                 let id = &err.ids[0];
-                ctx.sema_ctx_with_label(id, &format!("duplicate binding: {}", ctx.text_of(id)))
+                ctx.sema_ctx_with_label(
+                    id,
+                    &format!("duplicate binding: {}", ctx.text_of(id)),
+                )
             }
             ErrorKind::UnknownType => {
                 let id = &err.ids[0];
-                ctx.sema_ctx_with_label(&id, &format!("unknown type: `{}`", ctx.text_of(id)))
+                ctx.sema_ctx_with_label(
+                    &id,
+                    &format!("unknown type: `{}`", ctx.text_of(id)),
+                )
             }
             ErrorKind::UnknownName => {
                 let id = &err.ids[0];
-                ctx.sema_ctx_with_label(&id, &format!("unknown name: `{}`", ctx.text_of(id)))
+                ctx.sema_ctx_with_label(
+                    &id,
+                    &format!("unknown name: `{}`", ctx.text_of(id)),
+                )
             }
             ErrorKind::DuplicateType => {
                 let id = &err.ids[0];
-                ctx.sema_ctx_with_label(&id, &format!("redefined type: `{}`", ctx.text_of(id)))
+                ctx.sema_ctx_with_label(
+                    &id,
+                    &format!("redefined type: `{}`", ctx.text_of(id)),
+                )
             }
             ErrorKind::UnknownCall => {
                 let id = &err.ids[0];
-                ctx.sema_ctx_with_label(&id, &format!("unknown call to `{}`", ctx.text_of(id)))
+                ctx.sema_ctx_with_label(
+                    &id,
+                    &format!("unknown call to `{}`", ctx.text_of(id)),
+                )
             }
             ErrorKind::Unification => {
                 let (a, b) = (&err.ids[0], &err.ids[1]);
@@ -210,6 +248,13 @@ fn report_sema_err(ctx: &ModuleCtx, err: &sema::errors::Error) {
                     ctx.sema_ctx_with_label(expr, &ctx.type_of(expr)),
                 )
             }
+            ErrorKind::CallToNonFnType => {
+                let expr = &err.ids[0];
+                format!(
+                    "Not a function type!\n{}",
+                    ctx.sema_ctx_with_label(expr, &ctx.type_of(expr)),
+                )
+            }
         }
     );
 }
@@ -233,7 +278,11 @@ impl ModuleCtx<'_> {
         self.range_ctx_with_label(pos..pos, label)
     }
 
-    fn range_ctx_with_label(&self, range: std::ops::Range<usize>, label: &str) -> String {
+    fn range_ctx_with_label(
+        &self,
+        range: std::ops::Range<usize>,
+        label: &str,
+    ) -> String {
         self.source
             .span_for(range)
             .and_then(|span| {
@@ -249,7 +298,9 @@ impl ModuleCtx<'_> {
     fn sema_ctx_with_label(&self, id: &sema::ID, label: &str) -> String {
         self.syntax_of(id)
             .map(|node| self.range_ctx_with_label(node.range(), label))
-            .unwrap_or_else(|| format!("{}\n[err getting context] {:?}", label, id))
+            .unwrap_or_else(|| {
+                format!("{}\n[err getting context] {:?}", label, id)
+            })
     }
 
     fn type_of(&self, id: &sema::ID) -> String {
@@ -268,7 +319,8 @@ impl ModuleCtx<'_> {
 
     fn syntax_of(&self, id: &sema::ID) -> Option<cst::syntax::Node> {
         let bir_id = self.sema().bir(*id)?;
-        self.bir().ast(&bir_id).map(|node| node.syntax().clone())
+        let ast = self.bir().ast(&bir_id);
+        ast.map(|node| node.syntax().clone())
     }
 }
 

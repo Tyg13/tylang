@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::id::*;
 use crate::types::*;
 
 pub struct Builder {
@@ -20,7 +19,7 @@ struct ScopeStack {
 
 struct ScopeStackEntry {
     pub id: ID,
-    pub kind: ScopeKind,
+    pub kind: BlockKind,
 }
 
 impl ScopeStack {
@@ -30,11 +29,11 @@ impl ScopeStack {
         }
     }
 
-    fn top(&mut self) -> Option<&mut ScopeStackEntry> {
-        self.entries.last_mut()
+    fn top(&mut self) -> Option<ID> {
+        self.entries.last_mut().map(|scope| scope.id)
     }
 
-    fn last_of_kind(&self, kind: ScopeKind) -> Option<ID> {
+    fn last_of_kind(&self, kind: BlockKind) -> Option<ID> {
         self.entries.iter().rev().find_map(|entry| {
             if entry.kind == kind {
                 Some(entry.id)
@@ -44,7 +43,7 @@ impl ScopeStack {
         })
     }
 
-    fn push(&mut self, id: ID, kind: ScopeKind) {
+    fn push(&mut self, id: ID, kind: BlockKind) {
         self.entries.push(ScopeStackEntry { id, kind });
     }
 
@@ -76,19 +75,23 @@ impl Builder {
     }
 
     pub fn set_ast(&mut self, id: ID, ast: Arc<dyn ast::Node>) {
-        self.map.ast.insert(id, ast);
+        self.map.ast.insert(id, ast.clone());
     }
 
     pub fn new_module(&mut self) -> ID {
         let id = self.new_node(Kind::Module);
         if self.map.modules.len() == 0 {
-            self.map.root_module = id;
+            self.map.root_module = Some(id);
         }
         self.map.modules.insert(id, Module::new(id));
         id
     }
 
-    pub fn new_typedef(&mut self, identifier: &str, members: Vec<TypeMember>) -> ID {
+    pub fn new_typedef(
+        &mut self,
+        identifier: &str,
+        members: Vec<TypeMember>,
+    ) -> ID {
         let id = self.new_node(Kind::TypeDef);
         self.map.typedefs.insert(
             id,
@@ -96,6 +99,7 @@ impl Builder {
                 id,
                 identifier: identifier.to_string(),
                 members,
+                mod_: self.current_module.unwrap(),
             },
         );
         self.current_module().typedefs.push(id);
@@ -111,6 +115,7 @@ impl Builder {
             self.current_module().id,
             identifier.to_string(),
             return_type,
+            false,
         );
         self.map.functions.insert(id, func);
 
@@ -123,15 +128,8 @@ impl Builder {
         debug_assert!(self.map.typerefs.contains_key(&ty));
 
         let id = self.new_node(Kind::Parameter);
-        let param = Parameter::named(id, self.current_function().id, ty, identifier);
-        self.map.params.insert(id, param);
-        self.current_function().parameters.push(id);
-        id
-    }
-
-    pub fn new_va_param(&mut self) -> ID {
-        let id = self.new_node(Kind::Parameter);
-        let param = Parameter::var_args(id, self.current_function().id);
+        let param =
+            Parameter::new(id, self.current_function().id, ty, identifier);
         self.map.params.insert(id, param);
         self.current_function().parameters.push(id);
         id
@@ -143,22 +141,22 @@ impl Builder {
         id
     }
 
-    pub fn new_scope(&mut self, label: String, kind: ScopeKind) -> ID {
-        let id = self.new_node(Kind::Scope);
+    pub fn new_block(&mut self, kind: BlockKind, label: Option<String>) -> ID {
+        let id = self.new_node(Kind::Block);
+        let parent = self.scope_stack.top();
         let function = self.current_function.unwrap();
-        let parent = self.scope_stack.top().map(|top| top.id);
-        let scope = Scope::new(id, kind, parent, function, label);
-        self.map.scopes.insert(id, scope);
+        let scope = Block::new(id, kind, parent, function, label);
+        self.map.blocks.insert(id, scope);
         id
     }
 
     pub fn in_new_scope(
         &mut self,
-        label: String,
-        kind: ScopeKind,
+        label: Option<String>,
+        kind: BlockKind,
         f: impl FnOnce(&mut Self),
     ) -> ID {
-        let new_scope = self.new_scope(label, kind);
+        let new_scope = self.new_block(kind, label);
         self.scope_stack.push(new_scope, kind);
         f(self);
         self.scope_stack.pop();
@@ -175,7 +173,12 @@ impl Builder {
         id
     }
 
-    pub fn new_let_item(&mut self, name: String, ty: Option<ID>, expr: Option<ID>) -> ID {
+    pub fn new_let_item(
+        &mut self,
+        name: String,
+        ty: Option<ID>,
+        expr: Option<ID>,
+    ) -> ID {
         let id = self.new_node(Kind::Let);
         self.map.lets.insert(id, Let { id, name, ty, expr });
         self.new_item(ItemKind::Let(id))
@@ -224,32 +227,38 @@ impl Builder {
             .unwrap()
     }
 
+    pub fn add_module_child(&mut self, parent: ID, child: ID) {
+        debug_assert_eq!(self.map.mod_(&child).parent, None);
+        self.map.mod_mut(&child).parent = Some(parent);
+        self.map.mod_mut(&parent).modules.push(child);
+    }
+
     pub fn current_function(&mut self) -> &mut Function {
         self.current_function
             .map(|id| self.map.functions.get_mut(&id).unwrap())
             .unwrap()
     }
 
-    pub fn current_scope(&mut self) -> &mut Scope {
+    pub fn current_scope(&mut self) -> &mut Block {
         self.scope_stack
             .top()
-            .map(|top| self.map.scopes.get_mut(&top.id).unwrap())
+            .map(|id| self.map.blocks.get_mut(&id).unwrap())
             .unwrap()
     }
 
     pub fn last_loop_label(&self) -> String {
-        let id = self.scope_stack.last_of_kind(ScopeKind::Loop).unwrap();
-        debug_assert!(self.map.node(&id) == Kind::Scope);
-        self.map.scopes[&id].label.clone()
+        let id = self.scope_stack.last_of_kind(BlockKind::Loop).unwrap();
+        debug_assert!(self.map.kind(&id) == Kind::Block);
+        self.map.blocks[&id].label.clone().unwrap()
     }
 
     pub fn set_current_module(&mut self, id: ID) {
-        debug_assert!(self.map.node(&id) == Kind::Module);
+        debug_assert!(self.map.kind(&id) == Kind::Module);
         self.current_module = Some(id);
     }
 
     pub fn set_current_function(&mut self, id: ID) {
-        debug_assert!(self.map.node(&id) == Kind::Function);
+        debug_assert!(self.map.kind(&id) == Kind::Function);
         self.current_function = Some(id);
     }
 }

@@ -29,7 +29,12 @@ impl From<Token> for NodeOrToken {
 
 impl NodeOrToken {
     #[inline]
-    pub fn node(offset: usize, parent: &Node, node: &Arc<green::Node>, index: usize) -> Self {
+    pub fn node(
+        offset: usize,
+        parent: &Node,
+        node: &Arc<green::Node>,
+        index: usize,
+    ) -> Self {
         Self::Node(Node(Arc::new(NodeData {
             offset,
             parent: Some(Node::clone(parent)),
@@ -39,7 +44,12 @@ impl NodeOrToken {
     }
 
     #[inline]
-    pub fn token(offset: usize, parent: &Node, token: &Arc<green::Token>, index: usize) -> Self {
+    pub fn token(
+        offset: usize,
+        parent: &Node,
+        token: &Arc<green::Token>,
+        index: usize,
+    ) -> Self {
         Self::Token(Token(Arc::new(TokenData {
             offset,
             parent: Node::clone(parent),
@@ -132,7 +142,9 @@ impl NodeOrToken {
     }
 
     #[inline]
-    pub fn children_with_tokens(&self) -> impl Iterator<Item = NodeOrToken> + '_ {
+    pub fn children_with_tokens(
+        &self,
+    ) -> impl Iterator<Item = NodeOrToken> + '_ {
         self.into_node_ref()
             .into_iter()
             .flat_map(|node| node.children_with_tokens())

@@ -89,29 +89,43 @@ impl Node {
 
     #[inline]
     pub fn prev(&self) -> Option<NodeOrToken> {
-        self.parent
-            .as_ref()
-            .and_then(|parent| parent.child_by_index(self.index.saturating_sub(1)))
+        self.parent.as_ref().and_then(|parent| {
+            parent.child_by_index(self.index.saturating_sub(1))
+        })
     }
 
     #[inline]
     pub fn next(&self) -> Option<NodeOrToken> {
-        self.parent
-            .as_ref()
-            .and_then(|parent| parent.child_by_index(self.index.saturating_add(1)))
+        self.parent.as_ref().and_then(|parent| {
+            parent.child_by_index(self.index.saturating_add(1))
+        })
     }
 
     #[inline]
-    fn construct_child(&self, index: usize, green: &green::Child) -> NodeOrToken {
+    fn construct_child(
+        &self,
+        index: usize,
+        green: &green::Child,
+    ) -> NodeOrToken {
         match green {
             green::Child::Node {
                 relative_offset,
                 node,
-            } => NodeOrToken::node(self.offset + relative_offset, &self, node, index),
+            } => NodeOrToken::node(
+                self.offset + relative_offset,
+                &self,
+                node,
+                index,
+            ),
             green::Child::Token {
                 relative_offset,
                 token,
-            } => NodeOrToken::token(self.offset + relative_offset, &self, token, index),
+            } => NodeOrToken::token(
+                self.offset + relative_offset,
+                &self,
+                token,
+                index,
+            ),
         }
     }
 
@@ -124,7 +138,9 @@ impl Node {
     }
 
     #[inline]
-    pub fn children_with_tokens(&self) -> impl Iterator<Item = NodeOrToken> + '_ {
+    pub fn children_with_tokens(
+        &self,
+    ) -> impl Iterator<Item = NodeOrToken> + '_ {
         self.green
             .children
             .iter()
@@ -136,6 +152,11 @@ impl Node {
     pub fn children(&self) -> impl Iterator<Item = Node> + '_ {
         self.children_with_tokens()
             .filter_map(|child| child.into_node())
+    }
+
+    #[inline]
+    pub fn child(&self, i: usize) -> Node {
+        self.children().nth(i).unwrap()
     }
 
     #[inline]
@@ -155,7 +176,9 @@ impl Node {
             kind = self.kind(),
             children = self
                 .children_with_tokens()
-                .map(|child| { format!("\n{}", child.to_string_indented(indent + 2)) })
+                .map(|child| {
+                    format!("\n{}", child.to_string_indented(indent + 2))
+                })
                 .collect::<String>()
         )
     }

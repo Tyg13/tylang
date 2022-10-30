@@ -3,6 +3,7 @@ mod span;
 pub use anchor::*;
 pub use span::*;
 
+pub mod folding_set;
 pub mod intern_map;
 pub mod sparse_matrix;
 pub mod vec_graph;
@@ -12,6 +13,8 @@ pub use source_utils::*;
 
 pub mod string_utils;
 pub use string_utils::*;
+
+pub mod ap;
 
 pub fn join<T>(
     out: &mut dyn std::io::Write,

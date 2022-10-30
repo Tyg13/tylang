@@ -7,7 +7,10 @@ pub(super) fn expr(parser: &mut Parser<'_>) -> Option<CompletedMarker> {
     expr_with_precedence(parser, 0)
 }
 
-fn expr_with_precedence(parser: &mut Parser<'_>, min_precedence: usize) -> Option<CompletedMarker> {
+fn expr_with_precedence(
+    parser: &mut Parser<'_>,
+    min_precedence: usize,
+) -> Option<CompletedMarker> {
     // Parse LHS (including any prefix ops)
     let mut lhs = expr_lhs(parser)?;
     loop {
@@ -26,10 +29,15 @@ fn expr_with_precedence(parser: &mut Parser<'_>, min_precedence: usize) -> Optio
                 if left_binding < min_precedence {
                     break;
                 }
-                let node = lhs.precede(parser);
-                parser.token(op);
-                expr_with_precedence(parser, right_binding);
-                lhs = node.complete(parser, BIN_EXPR);
+                lhs = match op {
+                    T![as] => as_expr(parser, lhs),
+                    op => {
+                        let node = lhs.precede(parser);
+                        parser.token(op);
+                        expr_with_precedence(parser, right_binding);
+                        node.complete(parser, BIN_EXPR)
+                    }
+                };
             }
             _ => break,
         }
@@ -135,7 +143,8 @@ pub(super) fn block_inner(parser: &mut Parser<'_>) {
         next: Option<SyntaxKind>,
     ) {
         if let Some(ref previous) = previous_expr {
-            if previous.kind().terminated_by_semicolon() && parser.maybe(T![;]) {
+            if previous.kind().terminated_by_semicolon() && parser.maybe(T![;])
+            {
                 let stmt = previous.precede(parser);
                 parser.expect_token(T![;]);
                 stmt.complete(parser, EXPR_ITEM);
@@ -197,6 +206,7 @@ fn infix_op(parser: &mut Parser<'_>) -> Option<(SyntaxKind, usize, usize)> {
         T![=] if parser.at(T![==]) => T![==],
         T![<] if parser.at(T![<=]) => T![<=],
         T![>] if parser.at(T![>=]) => T![>=],
+        T![:] if parser.at(T![::]) => T![::],
         kind => kind,
     };
     let (left_binding, right_binding) = infix_binding_power(op_kind)?;
@@ -212,7 +222,7 @@ fn infix_binding_power(kind: SyntaxKind) -> Option<(usize, usize)> {
                | T![<]  | T![>]  => Some((2, 3)),
         T![+]  | T![-]           => Some((3, 4)),
         T![*]  | T![/]           => Some((4, 5)),
-        T![.]                    => Some((5, 6)),
+        T![.]  | T![::] | T![as] => Some((5, 6)),
         _ => None,
     }
 }
@@ -255,7 +265,14 @@ fn call_expr(parser: &mut Parser<'_>, lhs: CompletedMarker) -> CompletedMarker {
     parser.expect_token(T!['(']);
     loop {
         match parser.advance_to_next_non_trivia() {
-            T![')'] | EOF => break,
+            T![')'] => {
+                parser.expect_token(T![')']);
+                break;
+            }
+            EOF => {
+                parser.unexpected(EOF);
+                break;
+            }
             _ => {
                 expr(parser);
                 if parser.maybe(T![,]) {
@@ -264,16 +281,25 @@ fn call_expr(parser: &mut Parser<'_>, lhs: CompletedMarker) -> CompletedMarker {
             }
         }
     }
-    parser.expect_token(T![')']);
     node.complete(parser, CALL_EXPR)
 }
 
-fn index_expr(parser: &mut Parser<'_>, lhs: CompletedMarker) -> CompletedMarker {
+fn index_expr(
+    parser: &mut Parser<'_>,
+    lhs: CompletedMarker,
+) -> CompletedMarker {
     let node = lhs.precede(parser);
     parser.expect_token(T!['[']);
     expr(parser);
     parser.expect_token(T![']']);
     node.complete(parser, INDEX_EXPR)
+}
+
+fn as_expr(parser: &mut Parser<'_>, lhs: CompletedMarker) -> CompletedMarker {
+    let node = lhs.precede(parser);
+    parser.expect_token(T![as]);
+    type_(parser);
+    node.complete(parser, AS_EXPR)
 }
 
 #[cfg(test)]
@@ -654,5 +680,30 @@ MODULE:
                      RIGHT_PAREN @ 26..27: ')' 
                SEMICOLON @ 27..28: ';' "#]],
         );
+    }
+    #[test]
+    fn as_() {
+        check_tree(
+            "let _ = 10 as i32;",
+            expect![[r#"
+                MODULE @ 0..18:
+                  LET_ITEM @ 0..18:
+                    LET_KW @ 0..3: 'let' 
+                    WHITESPACE @ 3..4: ' ' 
+                    NAME @ 4..5:
+                      IDENT @ 4..5: '_' 
+                    WHITESPACE @ 5..6: ' ' 
+                    EQUALS @ 6..7: '=' 
+                    WHITESPACE @ 7..8: ' ' 
+                    AS_EXPR @ 8..17:
+                      LITERAL @ 8..10:
+                        NUMBER @ 8..10: '10' 
+                      WHITESPACE @ 10..11: ' ' 
+                      AS_KW @ 11..13: 'as' 
+                      WHITESPACE @ 13..14: ' ' 
+                      BASIC_TYPE @ 14..17:
+                        IDENT @ 14..17: 'i32' 
+                    SEMICOLON @ 17..18: ';' "#]],
+        )
     }
 }

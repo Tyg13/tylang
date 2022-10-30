@@ -1,87 +1,376 @@
 use crate::types::*;
-use crate::visit::*;
-use crate::Visitor;
+use crate::{visit, Visitor};
+use std::fmt::Write;
+
+const DEBUG_IDS: bool = false;
 
 pub fn print<'bir>(map: &'bir Map) {
-    Printer {
+    let mut p = Printer {
         map,
-        out: &mut std::io::stdout(),
-    }
-    .visit();
+        buf: String::new(),
+        indent: 0,
+    };
+    p.visit_root();
+    print!("{}", p.buf);
 }
 
-pub struct Printer<'bir, 'out> {
+pub struct Printer<'bir> {
     map: &'bir Map,
-    out: &'out mut dyn std::io::Write,
+    buf: String,
+    indent: usize,
 }
 
-impl Printer<'_, '_> {
-    pub fn join<T>(
-        &mut self,
-        sep: &str,
-        ts: impl Iterator<Item = T>,
-        each: impl Fn(&mut Self, T) -> std::io::Result<()>,
-    ) -> std::io::Result<()> {
-        let mut first = true;
-        for t in ts {
-            if !first {
-                write!(self.out, "{sep}")?;
-            }
-            first = false;
-            each(self, t)?;
+impl Printer<'_> {
+    pub fn indent_up(&mut self) -> usize {
+        self.indent += 2;
+        self.indent
+    }
+
+    pub fn indent_down(&mut self) -> usize {
+        self.indent -= 2;
+        self.indent
+    }
+
+    pub fn indented(&mut self, f: impl FnOnce(&mut Self)) {
+        self.indent_up();
+        f(self);
+        self.indent_down();
+    }
+}
+
+impl std::fmt::Write for Printer<'_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        if self.buf.ends_with("\n") {
+            self.buf.push_str(&" ".repeat(self.indent));
         }
+        self.buf.push_str(s);
         Ok(())
     }
 }
 
-impl<'bir> Visitor<'bir> for Printer<'bir, '_> {
+macro_rules! w { ($($args:tt)*) => { write!($($args)*).unwrap() } }
+macro_rules! wln { ($($args:tt)*) => { writeln!($($args)*).unwrap() } }
+
+impl<'bir> Visitor<'bir> for Printer<'bir> {
     fn map(&self) -> &'bir Map {
         self.map
     }
 
-    fn visit(&mut self) {
-        self.visit_module(self.map().root_module())
+    fn visit_module(&mut self, mod_: &Module) {
+        if DEBUG_IDS {
+            w!(self, "{:?} ", mod_.id);
+        }
+        let walk_inner = |this: &mut Self, m| {
+            visit::walk_modules(this, m);
+            visit::walk_typedefs(this, m);
+            visit::walk_functions(this, m);
+        };
+        match mod_.name {
+            Some(ref name) => {
+                wln!(self, "mod {name} {{");
+                self.indented(|this| {
+                    walk_inner(this, mod_);
+                });
+                wln!(self, "}}");
+            }
+            None => {
+                walk_inner(self, mod_);
+            }
+        }
     }
 
     fn visit_typedef(&mut self, typedef: &TypeDef) {
-        write!(self.out, "type {}", typedef.identifier);
-        write!(self.out, " {{");
-        let mut first = true;
-        self.join(", ", typedef.members.iter(), |this, member| {
-            write!(this.out, "{}: ", member.identifier);
-            this.visit_typeref(member.ty(self.map));
-            write!(this.out, "")
-        });
-        writeln!(self.out, "}}");
+        if DEBUG_IDS {
+            w!(self, "{:?} ", typedef.id);
+        }
+        w!(self, "type {}", typedef.identifier);
+        w!(self, " {{");
+        let ls = utils::ListSeparator::comma_space();
+        for member in typedef.members.iter() {
+            w!(self, "{ls}{}: ", member.identifier);
+            self.visit_typeref(member.ty(self.map));
+        }
+        wln!(self, "}}");
     }
 
     fn visit_function(&mut self, fn_: &Function) {
-        write!(self.out, "fn {}", fn_.identifier);
-        write!(self.out, "(");
-        walk_param_list(self, fn_);
-        write!(self.out, ") -> ");
+        if DEBUG_IDS {
+            w!(self, "{:?} ", fn_.id);
+        }
+        w!(self, "fn {}", fn_.identifier);
+        w!(self, "(");
+        let ls = utils::ListSeparator::comma_space();
+        for param in fn_.parameters(self.map) {
+            w!(self, "{ls}");
+            self.visit_param(param);
+        }
+        w!(self, ") -> ");
         self.visit_typeref(fn_.return_type(self.map));
-        writeln!(self.out);
+        if let Some(body) = fn_.body(self.map) {
+            w!(self, " ");
+            self.visit_block(body);
+        } else {
+            w!(self, ";");
+        }
+        wln!(self);
     }
 
     fn visit_param(&mut self, param: &Parameter) {
-        write!(self.out, "{}: ", param.identifier);
-        self.visit_typeref(param.ty(self.map))
+        if DEBUG_IDS {
+            w!(self, "{:?} ", param.id);
+        }
+        w!(self, "{}: ", param.identifier);
+        self.visit_typeref(param.ty(self.map));
     }
 
     fn visit_typeref(&mut self, typeref: &TypeRef) {
+        if DEBUG_IDS {
+            w!(self, "{:?} ", typeref.id);
+        }
         use TypeRefKind::*;
         match &typeref.kind {
             Void => {
-                write!(self.out, "void");
+                w!(self, "void");
             }
             Named { name } => {
-                write!(self.out, "{name}");
+                w!(self, "{name}");
             }
             Pointer { pointee } => {
-                write!(self.out, "*");
+                w!(self, "*");
                 self.visit_typeref(self.map.typeref(&pointee));
             }
+        };
+    }
+
+    fn visit_block(&mut self, scope: &Block) {
+        if DEBUG_IDS {
+            w!(self, "{:?} ", scope.id);
+        }
+        if let Some(label) = &scope.label {
+            w!(self, "['{label}]: ");
+        }
+        w!(self, "{{");
+        wln!(self);
+        self.indented(|this| {
+            for item in scope.items(this.map()) {
+                this.visit_item(item);
+                wln!(this, ";");
+            }
+            if let Some(expr) = scope.return_expr(this.map()) {
+                this.visit_expr(expr);
+                wln!(this);
+            }
+        });
+        w!(self, "}}");
+    }
+
+    fn visit_item(&mut self, item: &Item) {
+        if DEBUG_IDS {
+            w!(self, "{:?} ", item.id);
+        }
+        match &item.kind {
+            ItemKind::Let(id) => {
+                self.visit_let(self.map.let_(id));
+            }
+            ItemKind::Expr(id) => {
+                self.visit_expr(self.map.expr(id));
+            }
+        }
+    }
+
+    fn visit_let(&mut self, let_: &Let) {
+        if DEBUG_IDS {
+            w!(self, "{:?} ", let_.id);
+        }
+        w!(self, "let {}", let_.name);
+        if let Some(ty) = let_.ty(self.map) {
+            w!(self, ": ");
+            self.visit_typeref(ty);
+        }
+        if let Some(expr) = let_.expr(self.map) {
+            w!(self, " = ");
+            self.visit_expr(expr);
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        if DEBUG_IDS {
+            w!(self, "{:?} ", expr.id);
+        }
+        w!(self, "(");
+        match &expr.kind {
+            ExprKind::Literal(id) => {
+                if DEBUG_IDS {
+                    w!(self, "{:?} ", id);
+                }
+                match self.map.lit(id) {
+                    Literal::Number(n) => w!(self, "{n}"),
+                    Literal::Str(s) => w!(self, "{s:?}"),
+                };
+            }
+            ExprKind::NameRef { name } => {
+                w!(self, "{name}");
+            }
+            ExprKind::Cast { val, to } => {
+                let val = self.map.expr(val);
+                let ty = self.map.typeref(to);
+                self.visit_expr(val);
+                w!(self, " as ");
+                self.visit_typeref(ty);
+            }
+            ExprKind::Call { receiver, operands } => {
+                let fn_ = self.map.expr(receiver);
+                self.visit_expr(fn_);
+                w!(self, "(");
+                let ls = utils::ListSeparator::comma_space();
+                for arg in operands {
+                    w!(self, "{ls}");
+                    self.visit_expr(self.map.expr(arg));
+                }
+                w!(self, ")");
+            }
+            ExprKind::Index { receiver, index } => {
+                let val = self.map.expr(receiver);
+                let index = self.map.expr(index);
+                self.visit_expr(val);
+                w!(self, "[");
+                self.visit_expr(index);
+                w!(self, "]");
+            }
+            ExprKind::Op(op) => self.visit_op(op),
+            ExprKind::Block { scope: id } => {
+                self.visit_block(self.map.block(id));
+            }
+            ExprKind::Return { expr } => {
+                w!(self, "return");
+                if let Some(expr) = expr {
+                    w!(self, " ");
+                    self.visit_expr(self.map.expr(expr));
+                }
+            }
+            ExprKind::Break { label } => {
+                w!(self, "break '{label}");
+            }
+            ExprKind::Continue { label } => {
+                w!(self, "continue '{label}");
+            }
+            ExprKind::Branch {
+                condition,
+                kind,
+                left,
+                right,
+            } => {
+                w!(self, "if ");
+                self.visit_expr(self.map.expr(condition));
+                w!(self, " ");
+                match kind {
+                    BranchKind::If => {
+                        self.visit_block(self.map.block(left));
+                    }
+                    BranchKind::IfElse => {
+                        self.visit_block(self.map.block(left));
+                        w!(self, " else ");
+                        self.visit_block(self.map.block(&right.unwrap()));
+                    }
+                }
+            }
+            ExprKind::Loop { kind: _, body } => {
+                w!(self, "loop ");
+                self.visit_block(self.map.block(body));
+            }
+        };
+        w!(self, ")");
+    }
+}
+
+impl Printer<'_> {
+    fn visit_op(&mut self, op: &Op) {
+        match (&op.fixity, &op.kind) {
+            (OpFixity::Infix, OpKind::Plus) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, " + ");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::Minus) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, " - ");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::Multiply) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, " * ");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::Divide) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, " / ");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::Assignment) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, " = ");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::FieldAccess) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, ".");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::ScopeAccess) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, "::");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::LessThan) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, " < ");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::LessThanEquals) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, " <= ");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::GreaterThan) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, " > ");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::GreaterThanEquals) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, ">=");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::Equals) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, "==");
+                self.visit_expr(rhs);
+            }
+            _ => unreachable!(),
         }
     }
 }

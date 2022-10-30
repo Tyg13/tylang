@@ -1,6 +1,10 @@
-use crate::id::*;
-use std::collections::HashMap;
 use std::sync::Arc;
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub struct ID(pub usize);
+
+type IDMap<V> = fxhash::FxHashMap<ID, V>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Node;
@@ -8,23 +12,24 @@ pub(crate) struct Node;
 #[derive(Default, Clone)]
 pub struct Map {
     pub(crate) nodes: Vec<Kind>,
-    pub(crate) ast: HashMap<ID, Arc<dyn ast::Node>>,
-    pub(crate) typedefs: HashMap<ID, TypeDef>,
-    pub(crate) modules: HashMap<ID, Module>,
-    pub(crate) typerefs: HashMap<ID, TypeRef>,
-    pub(crate) functions: HashMap<ID, Function>,
-    pub(crate) literals: HashMap<ID, Literal>,
-    pub(crate) scopes: HashMap<ID, Scope>,
-    pub(crate) lets: HashMap<ID, Let>,
-    pub(crate) exprs: HashMap<ID, Expr>,
-    pub(crate) items: HashMap<ID, Item>,
-    pub(crate) params: HashMap<ID, Parameter>,
+    pub(crate) ast: IDMap<Arc<dyn ast::Node>>,
 
-    pub(crate) root_module: ID,
+    pub(crate) typedefs: IDMap<TypeDef>,
+    pub(crate) modules: IDMap<Module>,
+    pub(crate) typerefs: IDMap<TypeRef>,
+    pub(crate) functions: IDMap<Function>,
+    pub(crate) literals: IDMap<Literal>,
+    pub(crate) blocks: IDMap<Block>,
+    pub(crate) lets: IDMap<Let>,
+    pub(crate) exprs: IDMap<Expr>,
+    pub(crate) items: IDMap<Item>,
+    pub(crate) params: IDMap<Parameter>,
+
+    pub(crate) root_module: Option<ID>,
 }
 
 impl Map {
-    pub fn node(&self, id: &ID) -> Kind {
+    pub fn kind(&self, id: &ID) -> Kind {
         self.nodes.get(id.0).cloned().unwrap()
     }
 
@@ -33,16 +38,17 @@ impl Map {
     }
 
     pub fn root_module(&self) -> &Module {
-        self.mod_(&self.root_module)
+        self.mod_(&self.root_module.unwrap())
     }
 }
 
 macro_rules! impl_map_lookup_fns {
-    ($Map:ty {
-        $($map_name:ident: $map_type:ident = $fn_name:ident & $fn_mut_name:ident)*$(,)?
-    }) => {
-        impl $Map {
+    ($($map_name:ident: $map_type:ident = $fn_name:ident | $fn_mut_name:ident)*) => {
+        impl Map {
             $(
+                pub fn $map_name(&self) -> impl Iterator<Item = &$map_type> + '_ {
+                    self.$map_name.values()
+                }
                 pub fn $fn_name(&self, id: &ID) -> &$map_type {
                     debug_assert_eq!(self.nodes[id.0], Kind::$map_type);
                     self.$map_name.get(id).unwrap()
@@ -53,7 +59,7 @@ macro_rules! impl_map_lookup_fns {
                 }
             )*
         }
-        impl std::fmt::Debug for $Map {
+        impl std::fmt::Debug for Map {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.debug_list().entries(self.nodes.iter().enumerate());
                 let mut f = f.debug_struct("Map");
@@ -66,18 +72,16 @@ macro_rules! impl_map_lookup_fns {
 
 #[rustfmt::skip]
 impl_map_lookup_fns!(
-    Map {
-        modules   : Module    = mod_     & mod_mut
-        functions : Function  = fn_      & fn_mut
-        typerefs  : TypeRef   = typeref  & typeref_mut
-        typedefs  : TypeDef   = typedef  & typedef_mut
-        literals  : Literal   = lit      & lit_mut
-        lets      : Let       = let_     & let_mut
-        scopes    : Scope     = scope    & scope_mut
-        exprs     : Expr      = expr     & expr_mut
-        items     : Item      = item     & item_mut
-        params    : Parameter = param    & param_mut
-    }
+    modules   : Module    = mod_     | mod_mut
+    functions : Function  = fn_      | fn_mut
+    typerefs  : TypeRef   = typeref  | typeref_mut
+    typedefs  : TypeDef   = typedef  | typedef_mut
+    literals  : Literal   = lit      | lit_mut
+    lets      : Let       = let_     | let_mut
+    blocks    : Block     = block    | block_mut
+    exprs     : Expr      = expr     | expr_mut
+    items     : Item      = item     | item_mut
+    params    : Parameter = param    | param_mut
 );
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +91,7 @@ pub enum Kind {
     Parameter,
     TypeRef,
     TypeDef,
-    Scope,
+    Block,
     Item,
     Let,
     Expr,
@@ -97,16 +101,22 @@ pub enum Kind {
 #[derive(Debug, Clone)]
 pub struct Module {
     pub id: ID,
+    pub name: Option<String>,
     pub functions: Vec<ID>,
     pub typedefs: Vec<ID>,
+    pub modules: Vec<ID>,
+    pub parent: Option<ID>,
 }
 
 impl Module {
     pub fn new(id: ID) -> Self {
         Self {
             id,
+            name: None,
             functions: Vec::default(),
             typedefs: Vec::default(),
+            modules: Vec::default(),
+            parent: None,
         }
     }
 
@@ -123,6 +133,13 @@ impl Module {
     ) -> impl Iterator<Item = &'map Function> + 'this {
         self.functions.iter().map(|id| map.fn_(id))
     }
+
+    pub fn modules<'this, 'map: 'this>(
+        &'this self,
+        map: &'map Map,
+    ) -> impl Iterator<Item = &'map Module> + 'this {
+        self.modules.iter().map(|id| map.mod_(id))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +153,7 @@ pub struct TypeDef {
     pub id: ID,
     pub identifier: String,
     pub members: Vec<TypeMember>,
+    pub mod_: ID,
 }
 
 #[derive(Debug, Clone)]
@@ -160,27 +178,35 @@ pub enum TypeRefKind {
 #[derive(Debug, Clone)]
 pub struct Function {
     pub id: ID,
-    pub module: ID,
+    pub mod_: ID,
     pub identifier: String,
     pub parameters: Vec<ID>,
     pub body: Option<ID>,
     pub return_type: ID,
+    pub is_var_args: bool,
 }
 
 impl Function {
-    pub fn new(id: ID, module: ID, identifier: String, return_type: ID) -> Self {
+    pub fn new(
+        id: ID,
+        module: ID,
+        identifier: String,
+        return_type: ID,
+        is_var_args: bool,
+    ) -> Self {
         Self {
             id,
-            module,
+            mod_: module,
             identifier,
             parameters: Vec::default(),
             body: None,
             return_type,
+            is_var_args,
         }
     }
 
     pub fn mod_<'map>(&self, map: &'map Map) -> &'map Module {
-        map.mod_(&self.module)
+        map.mod_(&self.mod_)
     }
 
     pub fn parameters<'this, 'map: 'this>(
@@ -194,8 +220,8 @@ impl Function {
         map.typeref(&self.return_type)
     }
 
-    pub fn body<'map>(&self, map: &'map Map) -> Option<&'map Scope> {
-        self.body.map(|id| map.scope(&id))
+    pub fn body<'map>(&self, map: &'map Map) -> Option<&'map Block> {
+        self.body.map(|id| map.block(&id))
     }
 }
 
@@ -205,30 +231,17 @@ pub struct Parameter {
     pub function: ID,
     pub ty: ID,
     pub identifier: String,
-    pub is_var_args: bool,
 }
 
 impl Parameter {
-    pub fn named(id: ID, function: ID, ty: ID, name: String) -> Self {
+    pub fn new(id: ID, function: ID, ty: ID, name: String) -> Self {
         Self {
             id,
             function,
             ty,
             identifier: name,
-            is_var_args: false,
         }
     }
-
-    pub fn var_args(id: ID, function: ID) -> Self {
-        Self {
-            id,
-            function,
-            ty: NONE,
-            identifier: "...".to_string(),
-            is_var_args: true,
-        }
-    }
-
     pub fn function<'map>(&self, map: &'map Map) -> &'map Function {
         map.fn_(&self.function)
     }
@@ -239,10 +252,10 @@ impl Parameter {
 }
 
 #[derive(Debug, Clone)]
-pub struct Scope {
+pub struct Block {
     pub id: ID,
-    pub label: String,
-    pub kind: ScopeKind,
+    pub label: Option<String>,
+    pub kind: BlockKind,
 
     pub parent: Option<ID>,
     pub function: ID,
@@ -252,8 +265,8 @@ pub struct Scope {
     pub return_expr: Option<ID>,
 }
 
-impl Scope {
-    pub fn function<'map>(&self, map: &'map Map) -> &'map Function {
+impl Block {
+    pub fn fn_<'map>(&self, map: &'map Map) -> &'map Function {
         map.fn_(&self.function)
     }
 
@@ -277,20 +290,26 @@ impl Scope {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScopeKind {
+pub enum BlockKind {
     Function,
-    Block,
+    Expr,
     Loop,
 }
 
-impl Scope {
-    pub fn new(id: ID, kind: ScopeKind, parent: Option<ID>, function: ID, label: String) -> Self {
+impl Block {
+    pub fn new(
+        id: ID,
+        kind: BlockKind,
+        parent: Option<ID>,
+        function: ID,
+        label: Option<String>,
+    ) -> Self {
         Self {
             id,
             label,
             parent,
-            kind,
             function,
+            kind,
             lets: Vec::default(),
             items: Vec::default(),
             return_expr: None,
@@ -350,6 +369,10 @@ pub enum ExprKind {
     NameRef {
         name: String,
     },
+    Cast {
+        val: ID,
+        to: ID,
+    },
     Call {
         receiver: ID,
         operands: Vec<ID>,
@@ -363,7 +386,7 @@ pub enum ExprKind {
         scope: ID,
     },
     Return {
-        expr: ID,
+        expr: Option<ID>,
     },
     Break {
         label: String,
@@ -375,7 +398,7 @@ pub enum ExprKind {
         condition: ID,
         kind: BranchKind,
         left: ID,
-        right: ID,
+        right: Option<ID>,
     },
     Loop {
         kind: LoopKind,
@@ -433,6 +456,7 @@ pub enum OpKind {
     Multiply,
     Divide,
     FieldAccess,
+    ScopeAccess,
     LessThan,
     LessThanEquals,
     GreaterThan,

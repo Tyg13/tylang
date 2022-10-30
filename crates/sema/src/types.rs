@@ -1,26 +1,26 @@
 use crate::errors::Error;
-use std::{assert_matches::debug_assert_matches, collections::HashMap};
+use std::{
+    assert_matches::debug_assert_matches, borrow::BorrowMut,
+    collections::HashMap,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ID(pub(crate) usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Module,
     Type,
+    TypeMember,
     Function,
     Param,
     Var,
     Block,
-    Other,
     Constant,
+    Expr,
     Error,
 
     Tombstone,
-}
-
-pub trait HasKind {
-    const KIND: Kind;
 }
 
 #[derive(Debug, Default)]
@@ -29,29 +29,30 @@ pub struct Map {
     tombstones: Vec<ID>,
 
     assigned_type: HashMap<ID, ID>,
-    containing_ns: HashMap<ID, ID>,
-    casts: HashMap<ID, ID>,
+    marked_ids: HashMap<ID, Vec<ID>>,
+    parents: HashMap<ID, ID>,
+    constant_exprs: HashMap<ID, ID>,
+
+    pub(crate) builtins: Builtins,
 
     types: HashMap<ID, Type>,
     names: HashMap<ID, Name>,
     namespaces: HashMap<ID, Namespace>,
     functions: HashMap<ID, Function>,
     errors: HashMap<ID, Error>,
-    birs: HashMap<ID, bir::ID>,
     params: HashMap<ID, Param>,
     vars: HashMap<ID, Var>,
     constants: HashMap<ID, Constant>,
 
+    birs: HashMap<ID, bir::ID>,
     bir_to_id: HashMap<bir::ID, ID>,
 }
 
 impl Map {
-    pub fn bir_map(&self) -> impl Iterator<Item = (bir::ID, ID)> + '_ {
-        self.bir_to_id.iter().map(|(&bir, &id)| (bir, id))
-    }
-
     pub fn nodes(&self) -> impl Iterator<Item = (ID, Kind)> + '_ {
-        self.nodes.iter().enumerate().map(|(idx, &k)| (ID(idx), k))
+        self.nodes.iter().enumerate().filter_map(|(idx, &k)| {
+            (k != Kind::Tombstone).then_some((ID(idx), k))
+        })
     }
 
     pub fn kind(&self, id: ID) -> Kind {
@@ -69,17 +70,16 @@ impl Map {
         self.names.values()
     }
 
+    pub fn any_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+
     pub fn errors(&self) -> impl Iterator<Item = &Error> + '_ {
         self.errors.values()
     }
 
-    pub fn containing_ns_id(&self, id: ID) -> Option<ID> {
-        self.containing_ns.get(&id).copied()
-    }
-
-    pub fn containing_ns(&self, id: ID) -> Option<&Namespace> {
-        self.containing_ns_id(id)
-            .map(|id| self.ns(id).expect("internal namespace map inconsistency!"))
+    pub fn parent(&self, id: ID) -> Option<ID> {
+        self.parents.get(&id).copied()
     }
 
     pub fn fn_(&self, id: ID) -> Option<&Function> {
@@ -110,8 +110,8 @@ impl Map {
         self.namespaces.get(&id)
     }
 
-    pub fn bir_to_id(&self, bir: bir::ID) -> Option<ID> {
-        self.bir_to_id.get(&bir).copied()
+    pub fn bir_to_id(&self, bir: &bir::ID) -> Option<ID> {
+        self.bir_to_id.get(bir).copied()
     }
 
     pub fn is_err(&self, id: ID) -> bool {
@@ -119,7 +119,15 @@ impl Map {
     }
 
     pub fn ty(&self, id: ID) -> Option<&Type> {
-        self.ty_id(id).map(|id| self.types.get(&id).unwrap())
+        self.ty_id(id).map(|id| {
+            debug_assert_matches!(self.kind(id), Kind::Type);
+            self.types.get(&id).unwrap()
+        })
+    }
+
+    pub fn ty_member(&self, id: ID) -> TypeMember {
+        debug_assert_eq!(self.kind(id), Kind::TypeMember);
+        TypeMember { id }
     }
 
     pub fn ty_id(&self, id: ID) -> Option<ID> {
@@ -129,26 +137,39 @@ impl Map {
         self.assigned_type.get(&id).copied()
     }
 
-    pub(crate) fn new_ty(&mut self, kind: TypeKind) -> ID {
-        let id = self.new_node(Kind::Type);
-        self.types.insert(id, Type { id, kind });
-        id
+    pub fn constant(&self, mut id: ID) -> Option<&Constant> {
+        debug_assert_matches!(self.kind(id), Kind::Constant | Kind::Expr);
+        if self.kind(id) == Kind::Expr {
+            id = self.constant_exprs[&id];
+        }
+        self.constants.get(&id)
+    }
+
+    pub(crate) fn ns_mut(&mut self, id: ID) -> Option<NamespaceHandle<'_>> {
+        if !self.namespaces.contains_key(&id) {
+            return None;
+        }
+        Some(NamespaceHandle { id, map: self })
     }
 
     pub(crate) fn resolve_marker(&mut self, marker: ID, resolved_ty: ID) {
-        debug_assert_eq!(self.kind(marker), Kind::Type);
         debug_assert_eq!(self.kind(resolved_ty), Kind::Type);
         debug_assert_matches!(self.ty(marker).unwrap().kind, TypeKind::Marker);
-        for ty in self.assigned_type.values_mut() {
-            if *ty == marker {
-                *ty = resolved_ty;
-            }
+        let mut marked_ids = self.marked_ids.remove(&marker).unwrap();
+        for id in marked_ids.iter() {
+            *self.assigned_type.get_mut(id).unwrap() = resolved_ty;
         }
-        self.mark_tombstone(marker);
+        if self.ty(resolved_ty).unwrap().is_marker() {
+            // If the type we're resolving to is a marker, add this marker's ids to the
+            // newly-resolved marker's ids
+            let new_marked_ids = self.marked_ids.get_mut(&resolved_ty).unwrap();
+            new_marked_ids.append(&mut marked_ids);
+        }
+        self.remove_node(marker);
         self.types.remove(&marker);
     }
 
-    fn mark_tombstone(&mut self, id: ID) {
+    fn remove_node(&mut self, id: ID) {
         self.nodes[id.0] = Kind::Tombstone;
         self.tombstones.push(id);
     }
@@ -169,7 +190,13 @@ impl Map {
             Kind::Module | Kind::Function | Kind::Block => {
                 self.namespaces.insert(id, Namespace::empty(id));
             }
-            Kind::Param | Kind::Var | Kind::Type | Kind::Other | Kind::Error | Kind::Constant => {}
+            Kind::Param
+            | Kind::Var
+            | Kind::Type
+            | Kind::Constant
+            | Kind::Expr
+            | Kind::TypeMember
+            | Kind::Error => {}
             Kind::Tombstone => unreachable!("why are we making a tombstone?"),
         };
         id
@@ -182,36 +209,41 @@ impl Map {
         id
     }
 
-    pub fn constant(&self, id: ID) -> Option<&Constant> {
-        debug_assert_eq!(self.kind(id), Kind::Constant);
-        self.constants.get(&id)
-    }
-
-    pub(crate) fn ns_mut(&mut self, id: ID) -> Option<NamespaceHandle<'_>> {
-        if !self.namespaces.contains_key(&id) {
-            return None;
+    pub(crate) fn new_ty(&mut self, kind: TypeKind) -> ID {
+        let id = self.new_node(Kind::Type);
+        match kind {
+            TypeKind::Marker => {
+                self.marked_ids.insert(id, Vec::new());
+            }
+            TypeKind::Aggregate(..) | TypeKind::Prototype => {
+                self.namespaces.insert(id, Namespace::empty(id));
+            }
+            _ => {}
         }
-        Some(NamespaceHandle { id, map: self })
+        self.types.insert(id, Type { id, kind });
+        id
     }
 
     pub(crate) fn set_ty(&mut self, id: ID, ty: ID) {
         debug_assert_matches!(self.kind(ty), Kind::Type | Kind::Error);
         self.assigned_type.insert(id, ty);
-    }
-
-    pub fn cast_ty(&self, id: ID) -> Option<ID> {
-        self.casts.get(&id).copied()
-    }
-
-    pub(crate) fn set_cast(&mut self, id: ID, to_ty: ID) {
-        debug_assert!(self.ty(id).is_some());
-        debug_assert!(self.ty(to_ty).is_some());
-        dbg!(id, to_ty);
-        self.casts.insert(id, to_ty);
+        if self.ty(ty).map(Type::is_marker).unwrap_or(false) {
+            self.marked_ids.get_mut(&ty).unwrap().push(id);
+        }
     }
 
     pub(crate) fn set_err(&mut self, id: ID, err: Error) {
         self.errors.insert(id, err);
+    }
+
+    pub(crate) fn set_expr_constant(&mut self, expr: ID, const_: ID) {
+        debug_assert_eq!(self.kind(expr), Kind::Expr);
+        debug_assert_eq!(self.kind(const_), Kind::Constant);
+        self.constant_exprs.insert(expr, const_);
+    }
+
+    pub(crate) fn set_parent(&mut self, id: ID, parent: ID) {
+        self.parents.insert(id, parent);
     }
 
     fn set_name(&mut self, id: ID, name: Name) {
@@ -219,8 +251,20 @@ impl Map {
     }
 
     pub(crate) fn set_bir(&mut self, id: ID, bir: bir::ID) {
-        self.birs.insert(id, bir);
-        self.bir_to_id.insert(bir, id);
+        if let Some(old) = self.birs.insert(id, bir) {
+            panic!(
+                "warning: overwriting bir::{old:?} with bir::{bir:?} | sema::{id:?}"
+            );
+        }
+        self.set_bir_to_id(bir, id);
+    }
+
+    pub(crate) fn set_bir_to_id(&mut self, bir: bir::ID, id: ID) {
+        if let Some(old) = self.bir_to_id.insert(bir, id) {
+            panic!(
+                "warning: overwriting sema::{old:?} with sema::{id:?} | bir::{bir:?}"
+            );
+        }
     }
 
     pub fn try_get<T: FromMap>(&self, id: ID) -> Option<&T> {
@@ -230,11 +274,36 @@ impl Map {
     pub fn get<T: FromMap>(&self, id: ID) -> &T {
         <T as FromMap>::get(id, self)
     }
+}
 
-    pub(crate) fn any_markers_or_prototypes(&self) -> bool {
-        self.types
-            .values()
-            .any(|ty| matches!(ty.kind, TypeKind::Prototype | TypeKind::Marker))
+#[derive(Debug, Default)]
+pub struct Builtins {
+    pub(crate) void_type: Option<ID>,
+    pub(crate) string_type: Option<ID>,
+    pub(crate) bool_type: Option<ID>,
+    pub(crate) index_type: Option<ID>,
+    pub(crate) never_type: Option<ID>,
+}
+
+impl Map {
+    pub fn void_type(&self) -> ID {
+        self.builtins.void_type.expect("no void type builtin?")
+    }
+
+    pub fn string_type(&self) -> ID {
+        self.builtins.string_type.expect("no str type builtin?")
+    }
+
+    pub fn bool_type(&self) -> ID {
+        self.builtins.bool_type.expect("no bool type builtin?")
+    }
+
+    pub fn index_type(&self) -> ID {
+        self.builtins.index_type.expect("no index type builtin?")
+    }
+
+    pub fn never_type(&self) -> ID {
+        self.builtins.never_type.expect("no never type builtin?")
     }
 }
 
@@ -245,7 +314,7 @@ pub(crate) struct PrototypeTy {
 pub(crate) struct PrototypeFn {
     pub id: ID,
     pub bir: bir::ID,
-    pub return_: ID,
+    pub return_ty: ID,
 }
 
 impl PrototypeTy {
@@ -278,10 +347,6 @@ pub struct Type {
     pub kind: TypeKind,
 }
 
-impl HasKind for Type {
-    const KIND: Kind = Kind::Type;
-}
-
 impl FromMap for Type {
     fn try_get(id: ID, map: &Map) -> Option<&Type> {
         map.ty(id)
@@ -290,10 +355,26 @@ impl FromMap for Type {
 
 impl Type {
     pub fn as_fn_ty(&self) -> FunctionType {
+        self.into_fn_ty().unwrap()
+    }
+
+    pub fn into_fn_ty(&self) -> Option<FunctionType> {
         if let TypeKind::Function(fn_ty) = &self.kind {
-            fn_ty.clone()
+            Some(fn_ty.clone())
         } else {
-            panic!("Not a function type!")
+            None
+        }
+    }
+
+    pub fn as_aggregate_ty(&self) -> AggregateType {
+        self.into_aggregate_ty().unwrap()
+    }
+
+    pub fn into_aggregate_ty(&self) -> Option<AggregateType> {
+        if let TypeKind::Aggregate(aggregate) = &self.kind {
+            Some(aggregate.clone())
+        } else {
+            None
         }
     }
 
@@ -313,11 +394,11 @@ impl Type {
         }
     }
 
-    pub fn pointee(&self) -> Option<ID> {
+    pub fn pointee(&self) -> ID {
         if let TypeKind::Pointer { pointee } = self.kind {
-            Some(pointee)
+            pointee
         } else {
-            None
+            panic!("Not a pointer type: {:?}!", self.kind)
         }
     }
 
@@ -331,17 +412,25 @@ impl Type {
                 format!("*{}", map.ty(*pointee).unwrap().repr(map))
             }
             TypeKind::String => "str".to_string(),
-            TypeKind::Aggregate { members: _ } => ident.unwrap().to_string(),
+            TypeKind::Aggregate(..) => ident.unwrap().to_string(),
             TypeKind::Function(fn_ty) => {
-                let member_str = fn_ty
+                let mut member_str = fn_ty
                     .param_tys(map)
                     .map(|ty| ty.repr(map))
                     .collect::<Vec<_>>()
                     .join(", ");
+                if fn_ty.is_var_args {
+                    if member_str.is_empty() {
+                        member_str = String::from("...");
+                    } else {
+                        member_str.push_str(", ...");
+                    }
+                }
                 let return_str = fn_ty.return_ty(map).repr(map);
                 format!("fn ({member_str}) -> {return_str}")
             }
-            kind @ (TypeKind::Prototype | TypeKind::Marker) => unreachable!("{kind:?}"),
+            TypeKind::Marker => "{inferred}".to_string(),
+            TypeKind::Prototype => unreachable!(),
         }
     }
 
@@ -362,6 +451,18 @@ impl Type {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BasedType {
+    pub id: ID,
+    pub kind: BasedTypeKind,
+    pub based_on: ID,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BasedTypeKind {
+    Pointer,
+}
+
 #[derive(Debug, Clone)]
 pub enum TypeKind {
     Void,
@@ -369,7 +470,7 @@ pub enum TypeKind {
     Integer { size: usize },
     Pointer { pointee: ID },
     String,
-    Aggregate { members: Vec<ID> },
+    Aggregate(AggregateType),
     Function(FunctionType),
 
     // Only used during checking
@@ -378,9 +479,24 @@ pub enum TypeKind {
 }
 
 #[derive(Debug, Clone)]
+pub struct AggregateType {
+    pub members: Vec<ID>,
+}
+
+impl AggregateType {
+    pub fn offset_of(&self, id: ID) -> usize {
+        self.members
+            .iter()
+            .position(|&member| member == id)
+            .expect("not a member of this struct!")
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct FunctionType {
     pub return_ty: ID,
     pub parameters: Vec<ID>,
+    pub is_var_args: bool,
 }
 
 impl FunctionType {
@@ -396,15 +512,25 @@ impl FunctionType {
     }
 }
 
+pub struct TypeMember {
+    pub id: ID,
+}
+
+impl TypeMember {
+    pub fn parent<'map>(&self, map: &'map Map) -> &'map Type {
+        map.ty(map.parent(self.id).unwrap()).unwrap()
+    }
+
+    pub fn offset<'map>(&self, map: &'map Map) -> usize {
+        self.parent(map).as_aggregate_ty().offset_of(self.id)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Var {
     pub id: ID,
     pub ns: ID,
     pub idx: usize,
-}
-
-impl HasKind for Var {
-    const KIND: Kind = Kind::Var;
 }
 
 #[derive(Debug)]
@@ -416,17 +542,17 @@ pub enum Constant {
 #[derive(Debug, Clone)]
 pub struct Function {
     pub id: ID,
-    pub return_: ID,
+    pub return_ty: ID,
     pub params: Vec<ID>,
-}
-
-impl HasKind for Function {
-    const KIND: Kind = Kind::Function;
 }
 
 impl Function {
     pub fn name<'map>(&self, map: &'map Map) -> Option<&'map Name> {
         map.try_get::<Name>(self.id)
+    }
+
+    pub fn is_var_args(&self, map: &Map) -> bool {
+        map.ty(self.id).unwrap().as_fn_ty().is_var_args
     }
 }
 
@@ -449,10 +575,6 @@ impl Param {
     pub fn ty<'map>(&self, map: &'map Map) -> &'map Type {
         map.ty(self.id).unwrap()
     }
-}
-
-impl HasKind for Param {
-    const KIND: Kind = Kind::Param;
 }
 
 #[derive(Debug, Clone)]
@@ -500,7 +622,11 @@ impl Namespace {
         map.kind(self.id)
     }
 
-    pub fn param<'map>(&self, idx: usize, map: &'map Map) -> Option<&'map Name> {
+    pub fn param<'map>(
+        &self,
+        idx: usize,
+        map: &'map Map,
+    ) -> Option<&'map Name> {
         self.params.get(idx).and_then(|id| map.try_get(*id))
     }
 
@@ -509,16 +635,24 @@ impl Namespace {
     }
 
     pub fn parent<'map>(&self, map: &'map Map) -> Option<&'map Namespace> {
-        map.containing_ns(self.id)
+        map.parent(self.id).map(|id| map.ns(id).unwrap())
     }
 
-    pub fn lookup_ty<'map>(&self, map: &'map Map, ident: &str) -> Option<&'map Type> {
+    pub fn lookup_ty<'map>(
+        &self,
+        map: &'map Map,
+        ident: &str,
+    ) -> Option<&'map Type> {
         self.lookup(map, ident).and_then(|name| name.ty(map))
     }
 
-    pub fn lookup<'map>(&self, map: &'map Map, ident: &str) -> Option<&'map Name> {
-        for &id in self.members.iter().rev() {
-            let name = map.name(id).unwrap();
+    pub fn lookup<'map>(
+        &self,
+        map: &'map Map,
+        ident: &str,
+    ) -> Option<&'map Name> {
+        for id in self.members.iter().rev() {
+            let name = map.name(*id).unwrap();
             if name.ident == ident {
                 return Some(name);
             }
@@ -527,14 +661,6 @@ impl Namespace {
             return parent.lookup(map, ident);
         }
         None
-    }
-
-    pub fn get<'map, T: HasKind + FromMap>(&self, map: &'map Map, ident: &str) -> Option<&'map T> {
-        self.lookup(map, ident).map(|name| {
-            let id = name.id;
-            debug_assert_eq!(<T as HasKind>::KIND, map.kind(id));
-            <T as FromMap>::get(id, map)
-        })
     }
 }
 
@@ -547,17 +673,6 @@ pub(crate) struct NamespaceHandle<'map> {
 impl<'map> NamespaceHandle<'map> {
     fn ns(&mut self) -> &mut Namespace {
         self.map.namespaces.get_mut(&self.id).unwrap()
-    }
-
-    fn add_name(&mut self, id: ID, ident: &str) {
-        self.map.set_name(
-            id,
-            Name {
-                id,
-                ident: ident.to_string(),
-            },
-        );
-        self.ns().members.push(id);
     }
 
     fn add_and_get_idx(v: &mut Vec<ID>, id: ID) -> usize {
@@ -588,8 +703,28 @@ impl<'map> NamespaceHandle<'map> {
         );
     }
 
-    fn set_ns(&mut self, id: ID) {
-        self.map.containing_ns.insert(id, self.id);
+    fn set_parent_of(&mut self, id: ID) {
+        self.map.set_parent(id, self.id);
+    }
+
+    pub(crate) fn add_name(&mut self, id: ID, ident: &str) {
+        self.map.set_name(
+            id,
+            Name {
+                id,
+                ident: ident.to_string(),
+            },
+        );
+        self.ns().members.push(id);
+    }
+
+    pub(crate) fn new_module(&mut self, ident: Option<&str>) -> ID {
+        let id = self.map.new_node(Kind::Module);
+        if let Some(ident) = ident {
+            self.add_name(id, ident);
+        }
+        self.set_parent_of(id);
+        id
     }
 
     pub(crate) fn new_ty(&mut self, ident: Option<&str>, kind: TypeKind) -> ID {
@@ -597,7 +732,15 @@ impl<'map> NamespaceHandle<'map> {
         if let Some(ident) = ident {
             self.add_name(id, ident);
         }
-        self.set_ns(id);
+        self.set_parent_of(id);
+        id
+    }
+
+    pub(crate) fn new_ty_member(&mut self, ident: &str, ty: ID) -> ID {
+        let id = self.map.new_node(Kind::TypeMember);
+        self.add_name(id, ident);
+        self.map.set_ty(id, ty);
+        self.set_parent_of(id);
         id
     }
 
@@ -607,44 +750,53 @@ impl<'map> NamespaceHandle<'map> {
         }
     }
 
-    pub(crate) fn new_fn_proto(&mut self, ident: &str, bir: bir::ID, return_: ID) -> PrototypeFn {
+    pub(crate) fn new_fn_proto(
+        &mut self,
+        ident: &str,
+        bir: bir::ID,
+        return_ty: ID,
+    ) -> PrototypeFn {
         let id = self.map.new_node(Kind::Function);
         self.add_name(id, ident);
         self.map.functions.insert(
             id,
             Function {
                 id,
-                return_,
+                return_ty,
                 params: Vec::new(),
             },
         );
-        self.set_ns(id);
-        PrototypeFn { id, bir, return_ }
+        self.set_parent_of(id);
+        PrototypeFn { id, bir, return_ty }
+    }
+
+    pub(crate) fn new_node(&mut self, kind: Kind) -> ID {
+        let id = self.map.new_node(kind);
+        self.set_parent_of(id);
+        id
     }
 
     pub(crate) fn new_param(&mut self, ident: &str) -> ID {
         debug_assert_eq!(self.map.kind(self.id), Kind::Function);
-        let id = self.map.new_node(Kind::Param);
+        let id = self.new_node(Kind::Param);
         let idx = Self::add_and_get_idx(&mut self.ns().params, id);
         self.add_name(id, ident);
         self.set_param(id, idx);
-        self.set_ns(id);
         id
     }
 
     pub(crate) fn new_var(&mut self, ident: &str) -> ID {
         debug_assert_eq!(self.map.kind(self.id), Kind::Block);
-        let id = self.map.new_node(Kind::Var);
+        let id = self.new_node(Kind::Var);
         let idx = Self::add_and_get_idx(&mut self.ns().vars, id);
         self.add_name(id, ident);
         self.set_var(id, idx);
-        self.set_ns(id);
         id
     }
 
     pub(crate) fn new_block(&mut self) -> ID {
         let id = self.map.new_node(Kind::Block);
-        self.set_ns(id);
+        self.set_parent_of(id);
         id
     }
 }

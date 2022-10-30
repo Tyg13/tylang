@@ -1,5 +1,8 @@
 use crate::types::*;
-use std::fmt::Write;
+use std::{collections::HashSet, fmt::Write};
+
+const DEBUG_VALUE_NUMS: bool = false;
+const DEBUG_USERS: bool = false;
 
 struct Writer {
     buf: String,
@@ -36,155 +39,232 @@ impl std::fmt::Write for Writer {
     }
 }
 
-pub fn print(sema: &sema::Map, mod_: &Module) {
-    println!("{}", to_string(sema, mod_))
+pub fn print(lir: &Module) {
+    let mod_ = &lir;
+    println!("{}", to_string(mod_));
+    if DEBUG_USERS {
+        dump_users(mod_);
+    }
 }
 
 pub fn dump_users(mod_: &Module) {
     for f in mod_.functions.iter() {
         let mut first_val = true;
-        let val_sep = utils::ListSeparator::new("\n");
+        let indent = "   ";
         for val in f.values() {
             if first_val {
                 println!("{}:", f.ident);
                 first_val = false;
             }
-            let user_sep = utils::ListSeparator::new(", ");
-            let mut first_user = true;
+            print!("{indent}{}: ", val.id);
+            let user_sep = utils::ListSeparator::comma_space();
             for user in f.users(&val.id) {
-                if first_user {
-                    print!("  {val_sep}{:?}: ", val.id);
-                    first_user = false;
-                }
-                print!("{user_sep}{:?}", user);
+                print!("{user_sep}{}", user);
             }
+            println!()
         }
     }
 }
 
-pub fn to_string(sema: &sema::Map, mod_: &Module) -> String {
+pub fn to_string(mod_: &Module) -> String {
     let mut writer = Writer::new();
-    write_mod(&mut writer, sema, mod_);
+    write_mod(&mut writer, mod_).expect("error writing module!");
     writer.buf
 }
 
-fn write_mod(w: &mut Writer, sema: &sema::Map, mod_: &Module) {
-    let ls = utils::ListSeparator::new("\n");
+fn write_mod(w: &mut Writer, mod_: &Module) -> std::fmt::Result {
+    let ls = utils::ListSeparator::nl();
     for f in &mod_.functions {
-        write!(w, "{ls}");
-        write_fn(w, sema, &Context::full(mod_, f), f);
+        write!(w, "{ls}")?;
+        write_fn(w, Context::full(mod_, f), f)?;
     }
+    Ok(())
 }
 
-fn write_fn(w: &mut Writer, sema: &sema::Map, c: &Context, f: &Function) {
-    write!(w, "fn {}(", f.ident);
-    let ls = utils::ListSeparator::default();
-    for param in &f.params {
-        let param = sema.param(f.sema(param).unwrap()).unwrap();
-        let name = param.ident(sema);
-        let ty = param.ty(sema).repr(sema);
-        write!(w, "{ls}{name}: {ty}");
+fn write_fn(w: &mut Writer, c: Context, f: &Function) -> std::fmt::Result {
+    if DEBUG_VALUE_NUMS {
+        write!(w, "({}) ", f.id)?;
     }
-    write!(w, ")");
+    write!(w, "fn {}(", f.ident)?;
+    let ls = utils::ListSeparator::comma_space();
+    for param in &f.params {
+        let name = param.val.ident(c);
+        let ty = param.val.ty(c).repr(c);
+        write!(w, "{ls}{name}: {ty}")?;
+        if DEBUG_VALUE_NUMS {
+            write!(w, " ({})", param.val.id)?;
+        }
+    }
+    if f.is_var_args {
+        write!(w, ", ...")?;
+    }
+    write!(w, ")")?;
+    write!(w, " -> {}", f.return_ty(c).repr(c))?;
 
     if f.insts.is_empty() {
-        write!(w, ";");
-        return;
+        write!(w, ";")?;
+        return Ok(());
     }
 
-    writeln!(w, "{{");
-    w.indent();
-    let ls = utils::ListSeparator::new("\n");
-    for inst in &f.insts {
-        write!(w, "{ls}");
-        write_inst(w, sema, c, inst);
+    writeln!(w, " {{")?;
+
+    let mut unreachable: HashSet<_> = f.blocks().collect();
+    f.visit_blocks_in_rpo(|block| {
+        unreachable.remove(&block);
+        write_block(block, f, w, c).unwrap();
+    });
+
+    if !unreachable.is_empty() {
+        for block in unreachable {
+            write!(w, "[[unreachable]] ")?;
+            write_block(block, f, w, c)?;
+        }
     }
-    w.dedent();
-    write!(w, "\n}}");
+
+    write!(w, "}}")?;
+
+    Ok(())
 }
 
-fn write_inst(w: &mut Writer, sema: &sema::Map, ctx: &Context, inst: &Inst) {
+fn write_block(
+    block: Block,
+    f: &Function,
+    w: &mut Writer,
+    c: Context,
+) -> std::fmt::Result {
+    write_val(w, c, &block.val(c))?;
+    writeln!(w)?;
+    w.indent();
+    let mut any_insts = false;
+    for inst in block.insts(f) {
+        write_inst(w, c, inst)?;
+        any_insts = true;
+    }
+    if any_insts {
+        writeln!(w)?;
+    }
+    w.dedent();
+    Ok(())
+}
+
+fn write_inst(w: &mut Writer, ctx: Context, inst: &Inst) -> std::fmt::Result {
+    if DEBUG_VALUE_NUMS {
+        write!(w, "({}): ", inst.val.id)?;
+    }
     match inst.kind {
         InstKind::Store => {
             let dest = &inst.lval.unwrap();
             let f = ctx.as_fn();
-            let store_to_var_or_param = match inst.val.kind(f) {
+            let store_to_var_or_param = match inst.lval.unwrap().kind(f) {
                 ValueKind::Param => true,
                 ValueKind::Inst => dest.is_var(f),
-                _ => false,
+                kind => unreachable!("{kind:?}"),
             };
             let src = &inst.rvals[0];
             if store_to_var_or_param {
-                write_val(w, sema, ctx, dest);
-                write!(w, " = ");
-                write_val(w, sema, ctx, src);
+                write_val(w, ctx, dest)?;
+                write!(w, " = ")?;
+                write_val(w, ctx, src)?;
             } else {
-                write_val(w, sema, ctx, dest);
-                write!(w, "^ = ");
-                write_val(w, sema, ctx, src);
+                write_val(w, ctx, dest)?;
+                write!(w, "^ = ")?;
+                write_val(w, ctx, src)?;
             }
-            return;
+            writeln!(w)?;
+            return Ok(());
         }
         InstKind::Var => {
-            write!(w, "var ");
-            write_val(w, sema, ctx, &inst.val);
-            return;
+            write!(w, "var ")?;
+            write_val(w, ctx, &inst.lval.unwrap())?;
+            write!(w, ": {}", inst.lval().ty(ctx).repr(ctx))?;
+            writeln!(w)?;
+            return Ok(());
         }
         _ => {}
     }
 
     if let Some(lval) = &inst.lval {
-        write_val(w, sema, ctx, lval);
-        write!(w, " = ");
+        write_val(w, ctx, lval)?;
+        write!(w, " = ")?;
     }
 
     match inst.kind {
+        InstKind::Var | InstKind::Store => unreachable!(), // handled above
         InstKind::Call => {
             let called_fn = &inst.rvals[0];
-            write_val(w, sema, ctx, called_fn);
-            let arg_sep = utils::ListSeparator::new(", ");
-            write!(w, "(");
+            write_val(w, ctx, called_fn)?;
+            let arg_sep = utils::ListSeparator::comma_space();
+            write!(w, "(")?;
             for op in inst.rvals.iter().skip(1) {
-                write!(w, "{arg_sep}");
-                write_val(w, sema, ctx, op)
+                write!(w, "{arg_sep}")?;
+                write_val(w, ctx, op)?;
             }
-            write!(w, ")");
-            return;
+            writeln!(w, ")")?;
+            return Ok(());
         }
         InstKind::Offset => {
-            write!(w, "&");
-            write_val(w, sema, ctx, &inst.rvals[0]);
-            write!(w, "[");
-            write_val(w, sema, ctx, &inst.rvals[1]);
-            write!(w, "]");
-            return;
+            write!(w, "&")?;
+            write_val(w, ctx, &inst.rvals[0])?;
+            write!(w, "[")?;
+            write_val(w, ctx, &inst.rvals[1])?;
+            writeln!(w, "]")?;
+            return Ok(());
         }
         InstKind::Load => {
-            write_val(w, sema, ctx, &inst.rvals[0]);
-            write!(w, "^");
-            return;
+            write_val(w, ctx, &inst.rvals[0])?;
+            writeln!(w, "^")?;
+            return Ok(());
         }
-        InstKind::Add => write!(w, "add "),
-        InstKind::Return => write!(w, "return "),
-        InstKind::Cmp { kind } => match kind {
-            CmpKind::Eq => write!(w, "eq"),
-        },
-        InstKind::Copy => write!(w, "copy "),
-        _ => unreachable!(),
+        InstKind::Cast => {
+            let ty = inst.lval().ty(ctx).repr(ctx);
+            write!(w, "@cast.{} ", ty)?;
+            write_val(w, ctx, &inst.rvals[0])?;
+            writeln!(w)?;
+            return Ok(());
+        }
+        InstKind::Add => write!(w, "add")?,
+        InstKind::Return => write!(w, "return")?,
+        InstKind::Cmp { kind } => {
+            write!(w, "(")?;
+            write_val(w, ctx, &inst.rvals[0])?;
+            match kind {
+                CmpKind::Eq => write!(w, " == ")?,
+                CmpKind::Gt => write!(w, " > ")?,
+                CmpKind::Lt => write!(w, " < ")?,
+                CmpKind::Gte => write!(w, " >= ")?,
+                CmpKind::Lte => write!(w, " <= ")?,
+            };
+            write_val(w, ctx, &inst.rvals[1])?;
+            write!(w, ")")?;
+            writeln!(w)?;
+            return Ok(());
+        }
+        InstKind::Copy => write!(w, "copy")?,
+        InstKind::Nop => write!(w, "nop")?,
+        InstKind::Jmp => write!(w, "jmp")?,
+        InstKind::Branch => write!(w, "br")?,
+        InstKind::Sub => write!(w, "sub")?,
+        InstKind::Mul => write!(w, "mul")?,
+        InstKind::Div => write!(w, "div")?,
+        InstKind::Subscript => write!(w, "subscript")?,
     };
 
-    let ls = utils::ListSeparator::default();
+    write!(w, " ")?;
+
+    let ls = utils::ListSeparator::comma_space();
     for rval in &inst.rvals {
-        write!(w, "{ls}");
-        write_val(w, sema, ctx, rval);
+        write!(w, "{ls}")?;
+        write_val(w, ctx, rval)?;
     }
+    writeln!(w)?;
+
+    Ok(())
 }
 
-const DEBUG_VALUE_NUMS: bool = false;
-
-fn write_val(w: &mut Writer, sema: &sema::Map, ctx: &Context, val: &ValueRef) {
-    write!(w, "{}", val.repr(ctx.clone(), sema));
+fn write_val(w: &mut Writer, ctx: Context, val: &ValueRef) -> std::fmt::Result {
+    write!(w, "{}", val.repr(ctx.clone()))?;
     if DEBUG_VALUE_NUMS {
-        write!(w, " ({})", val.id.0);
+        write!(w, " ({})", val.id)?;
     }
+    Ok(())
 }

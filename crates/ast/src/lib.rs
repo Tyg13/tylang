@@ -311,10 +311,15 @@ mod grammar {
     }
 
     decl_node!(struct Module: MODULE {
-        (items: NodeList<Item>)
+        (mod_kw  : Token    <ModKw     >)
+        (name    : Token    <Ident     >)
+        (l_curly : Token    <LeftCurly >)
+        (items   : NodeList <Item      >)
+        (r_curly : Token    <RightCurly>)
     });
 
     decl_node_enum!(enum Item {
+        Module(mod_),
         FnDef(fn_),
         Let(let_),
         ExprItem(expr_item),
@@ -402,6 +407,7 @@ mod grammar {
         Return(return_),
         Break(break_),
         Continue(continue_),
+        Cast(cast_),
         CallExpr(call_expr),
         IndexExpr(index_expr),
         IfExpr(if_expr),
@@ -449,6 +455,11 @@ mod grammar {
     decl_node!(struct Continue: CONTINUE_EXPR {
         (continue_kw  : Token<ContinueKw>)
     });
+    decl_node!(struct Cast: AS_EXPR {
+        (expr   : Node<Expr>)
+        (as_kw  : Token<AsKw>)
+        (ty     : Node<Type>)
+    });
     decl_node!(struct CallExpr: CALL_EXPR {
         (receiver  : NthNode <0, Expr   >)
         (l_paren   : Token   <LeftParen >)
@@ -495,6 +506,7 @@ mod grammar {
         Gte(gte),
         And(and),
         Assign(assign),
+        ColonColon(colon_colon),
     });
 
     decl_token!(struct Plus       : T![+]);
@@ -509,6 +521,7 @@ mod grammar {
     decl_token!(struct Gte        : T![<=]);
     decl_token!(struct And        : T![&&]);
     decl_token!(struct Assign     : T![=]);
+    decl_token!(struct ColonColon : T![::]);
 
     decl_token!(struct Ident      : IDENT);
     decl_token!(struct Number     : NUMBER);
@@ -523,12 +536,14 @@ mod grammar {
     decl_token!(struct Comma      : T![,]);
     decl_token!(struct Colon      : T![:]);
     decl_token!(struct Equals     : T![=]);
+    decl_token!(struct ModKw      : T![mod]);
     decl_token!(struct TypeKw     : T![type]);
     decl_token!(struct FnKw       : T![fn]);
     decl_token!(struct LetKw      : T![let]);
     decl_token!(struct ReturnKw   : T![return]);
     decl_token!(struct BreakKw    : T![break]);
     decl_token!(struct ContinueKw : T![continue]);
+    decl_token!(struct AsKw       : T![as]);
     decl_token!(struct IfKw       : T![if]);
     decl_token!(struct ElseKw     : T![else]);
     decl_token!(struct LoopKw     : T![loop]);
@@ -545,7 +560,8 @@ mod tests {
     use cst::parser::{grammar::EntryPoint, Output};
 
     fn parse_with_entry(s: &str, entry: EntryPoint) -> syntax::Node {
-        let Output { root, errors } = cst::parser::parse_str_from_entry(s.trim(), entry);
+        let Output { root, errors } =
+            cst::parser::parse_str_from_entry(s.trim(), entry);
         eprintln!("{}", root);
         eprintln!("{:?}", errors);
         assert_eq!(errors.len(), 0);
@@ -553,7 +569,8 @@ mod tests {
     }
 
     fn check_module(s: &str, expected: Expect) {
-        let expr = Module::cast(parse_with_entry(s, EntryPoint::Module)).unwrap();
+        let expr =
+            Module::cast(parse_with_entry(s, EntryPoint::Module)).unwrap();
         expected.assert_eq(&expr.to_string());
     }
 
@@ -563,7 +580,8 @@ mod tests {
     }
 
     fn check_expr(s: &str, expected: Expect) {
-        let expr = Expr::cast(parse_with_entry(s, EntryPoint::Expression)).unwrap();
+        let expr =
+            Expr::cast(parse_with_entry(s, EntryPoint::Expression)).unwrap();
         expected.assert_eq(&expr.to_string());
     }
 
@@ -655,6 +673,25 @@ fn bar() {}
             expect![[r#"
                 Block:
                   LeftCurly: {
+                  ExprItem:
+                    IfExpr:
+                      IfKw: if
+                      BinExpr:
+                        NameRef:
+                          Ident: n
+                        Gte: <=
+                        Literal:
+                          Number: 1
+                      Block:
+                        LeftCurly: {
+                        Return:
+                          ReturnKw: return
+                          NameRef:
+                            Ident: n
+                        RightCurly: }
+                      ElseKw: None
+                      Block: None
+                    SemiColon: None
                   Let:
                     LetKw: let
                     Name:
@@ -670,26 +707,8 @@ fn bar() {}
                       Literal:
                         Number: 2
                     SemiColon: ;
-                  IfExpr:
-                    IfKw: if
-                    BinExpr:
-                      NameRef:
-                        Ident: n
-                      Gte: <=
-                      Literal:
-                        Number: 1
-                    Block:
-                      LeftCurly: {
-                      Return:
-                        ReturnKw: return
-                        NameRef:
-                          Ident: n
-                      RightCurly: }
-                    ElseKw: None
-                    Block: None
-                  BinExpr:
-                    NameRef:
-                      Ident: n
+                  NameRef:
+                    Ident: n
                   RightCurly: }"#]],
         )
     }

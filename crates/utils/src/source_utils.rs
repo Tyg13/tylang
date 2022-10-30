@@ -31,7 +31,8 @@ impl SourceBuilder {
             .file
             .map(|s| if s == "-" { "<stdin>".to_string() } else { s })
             .unwrap_or(String::from("<err>"));
-        let chars: Vec<char> = self.source.unwrap_or_default().chars().collect();
+        let chars: Vec<char> =
+            self.source.unwrap_or_default().chars().collect();
         let line_ends = chars
             .iter()
             .enumerate()
@@ -132,7 +133,10 @@ impl Source {
     }
 
     pub fn give_context_at(&self, at: Anchor) -> Option<String> {
-        self.give_context_span(Span { start: at, end: at }, HandPosition::BeginOfSpan)
+        self.give_context_span(
+            Span { start: at, end: at },
+            HandPosition::BeginOfSpan,
+        )
     }
 
     pub fn give_context_span_and_label(
@@ -158,11 +162,13 @@ impl Source {
             WholeSpan => (span.start.column, span.end.column),
             EndOfSpan => (span.end.column, span.end.column),
         };
-        let hand = str::repeat("^", std::cmp::max(1, end.saturating_sub(start)));
+        let hand =
+            str::repeat("^", std::cmp::max(1, end.saturating_sub(start)));
         let trailer = if let Some(label) = label {
             format!(
                 "\n{spaces}|--- {label}",
-                spaces = str::repeat(" ", prefix.len() + hand.len() / 2 + start - 1)
+                spaces =
+                    str::repeat(" ", prefix.len() + hand.len() / 2 + start - 1)
             )
         } else {
             "".to_string()
@@ -173,7 +179,11 @@ impl Source {
         ))
     }
 
-    pub fn give_context_span(&self, span: Span, arm: HandPosition) -> Option<String> {
+    pub fn give_context_span(
+        &self,
+        span: Span,
+        arm: HandPosition,
+    ) -> Option<String> {
         self.give_context_span_and_label(span, arm, None)
     }
 }

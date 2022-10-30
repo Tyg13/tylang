@@ -35,10 +35,9 @@ impl<'source> EventSink for Builder<'source> {
 
     fn error(&mut self, msg: String) {
         let position = self.position;
-        if let Some((_, last_position)) = self.errors.last() {
-            if *last_position == position {
-                return;
-            }
+        if let Some((_, last_position)) = self.errors.last() && *last_position == position {
+            // Avoid stacking redundant errors on the same position
+            return;
         }
         let context = self
             .context_stack
@@ -69,7 +68,11 @@ impl<'tokens> Builder<'tokens> {
         }
     }
 
-    fn text_in_range(source: &'tokens str, position: &Position, len: usize) -> &'tokens str {
+    fn text_in_range(
+        source: &'tokens str,
+        position: &Position,
+        len: usize,
+    ) -> &'tokens str {
         let start = position.offset;
         let end = start + len;
         &source[start..end]
@@ -98,8 +101,12 @@ impl<'tokens> Builder<'tokens> {
     }
 }
 
-pub(crate) fn parse(mut input: crate::parser::input::Input, entry: grammar::EntryPoint) -> Output {
-    let mut builder = Builder::new(input.source, input.token_lens, input.token_cache);
+pub(crate) fn parse(
+    mut input: crate::parser::input::Input,
+    entry: grammar::EntryPoint,
+) -> Output {
+    let mut builder =
+        Builder::new(input.source, input.token_lens, input.token_cache);
     parse_impl(entry, &mut input.tokens, &mut builder);
     let (root, errors) = builder.finish();
     Output { root, errors }
@@ -141,7 +148,10 @@ fn parse_impl(
                     // events in reverse order (C -> B -> A). As we do so, we replace the
                     // original event with a dead element to mark that it has already
                     // been processed.
-                    match std::mem::replace(&mut events[idx], Event::tombstone()) {
+                    match std::mem::replace(
+                        &mut events[idx],
+                        Event::tombstone(),
+                    ) {
                         Event::NodeStart(kind, grandparent) => {
                             nodes.push(kind);
                             parent = grandparent;

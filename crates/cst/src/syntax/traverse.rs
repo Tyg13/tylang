@@ -23,7 +23,10 @@ pub enum Step<R> {
     Terminate(R),
 }
 
-pub fn iterate<R>(node: NodeOrToken, mut f: impl FnMut(NodeOrToken) -> Step<R>) -> R {
+pub fn iterate<R>(
+    node: NodeOrToken,
+    mut f: impl FnMut(NodeOrToken) -> Step<R>,
+) -> R {
     match f(node) {
         Step::Continue(node) => iterate(node, f),
         Step::Terminate(result) => result,
