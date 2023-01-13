@@ -21,7 +21,7 @@ pub trait Visitor<'bir>: Sized {
     fn visit_item(&mut self, item: &Item) {
         walk_item(self, item);
     }
-    fn visit_let(&mut self, let_: &Let) {}
+    fn visit_let(&mut self, _let: &Let) {}
     fn visit_expr(&mut self, expr: &Expr) {
         walk_expr(self, expr);
     }

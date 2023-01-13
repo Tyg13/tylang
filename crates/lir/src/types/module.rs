@@ -1,7 +1,4 @@
-use crate::types::{
-    ConstantKind, Function, TyContext, TyID, ValueID, ValueKind, ValueRef,
-    Values,
-};
+use crate::types::*;
 use std::collections::HashMap;
 
 #[derive(Debug)]

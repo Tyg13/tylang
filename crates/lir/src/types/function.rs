@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 use utils::vec_graph::traversal;
 
-use crate::types::{
-    Block, BlockData, BlockGraph, Inst, InstKind, Ty, TyContext, TyID, Users,
-    Value, ValueID, ValueKind, ValueRef, Values,
-};
+use crate::types::*;
 
 #[derive(Debug)]
 pub struct Function {

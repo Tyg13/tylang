@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::collections::HashSet;
 
 use crate::builder::Session;
 use crate::types::*;
@@ -327,7 +326,7 @@ fn value(
             }
         }
         bir::ExprKind::Op(op) => match &op.kind {
-            bir::OpKind::Assignment => assign_expr(builder, op, ty),
+            bir::OpKind::Assignment => assign_expr(builder, op),
             bir::OpKind::FieldAccess => {
                 field_access_expr(builder, cat, lval, op, ty)
             }
@@ -424,7 +423,7 @@ fn field_access_expr(
     }
 }
 
-fn assign_expr(builder: &mut Builder, op: &bir::Op, ty: TyID) -> ValueRef {
+fn assign_expr(builder: &mut Builder, op: &bir::Op) -> ValueRef {
     let to = lvalue(builder, builder.sess.bir.expr(&op.operands[0]));
     rvalue(builder, Some(to), builder.sess.bir.expr(&op.operands[1]));
     to.dup()
