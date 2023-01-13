@@ -11,6 +11,7 @@ members = [
     "crates/tyls",
     "crates/utils",
     "crates/parser",
+    "xtask",
 ]
 
 [profile.release]
