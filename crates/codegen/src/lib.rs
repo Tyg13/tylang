@@ -168,7 +168,7 @@ impl<'ctx> CG<'ctx> {
             TyKind::Pointer => {
                 let target_ty = ty.as_ptr_ty().pointee(self.lir);
                 self.translate_type(&target_ty)
-                    .ptr_type(llvm::AddressSpace::Generic)
+                    .ptr_type(llvm::AddressSpace::from(0))
                     .into()
             }
             TyKind::Fn { .. } | TyKind::Void => unreachable!("{:?}", ty.kind),
