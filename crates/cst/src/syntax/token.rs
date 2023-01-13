@@ -68,7 +68,7 @@ impl TokenData {
     }
 
     #[inline]
-    pub fn parents(&self) -> impl Iterator<Item = Node> + '_ {
+    pub fn ancestors(&self) -> impl Iterator<Item = Node> + '_ {
         std::iter::successors(Some(self.parent()), Node::parent)
     }
 

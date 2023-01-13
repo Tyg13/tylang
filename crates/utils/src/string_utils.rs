@@ -39,6 +39,10 @@ impl std::fmt::Display for ListSeparator {
 /// ```
 /// assert_eq!(utils::trim_and_unescape(r#""foo""#), "foo");
 /// assert_eq!(utils::trim_and_unescape(r#""bar\n""#), "bar\n");
+/// assert_eq!(utils::trim_and_unescape(r#""baz\nbip\rbing""#), "baz\nbip\rbing");
+/// assert_eq!(utils::trim_and_unescape(r#""baz\\\rbip""#), "baz\\\rbip");
+/// assert_eq!(utils::trim_and_unescape(r#""baz\\\dbip""#), r"baz\\dbip");
+/// assert_eq!(utils::trim_and_unescape(r#""""#), "");
 /// ```
 pub fn trim_and_unescape(s: &str) -> String {
     debug_assert!(s.len() >= 2);
@@ -48,19 +52,23 @@ pub fn trim_and_unescape(s: &str) -> String {
     let mut res = String::with_capacity(s.len());
     let mut in_escape = false;
     for c in s[1..s.len() - 1].chars() {
-        if c == '\\' {
+        if !in_escape && c == '\\' {
             in_escape = true;
             continue;
         }
-        if in_escape {
-            in_escape = false;
-            if c == 'n' {
-                res.push('\n');
-                continue;
+        match c {
+            'n' if in_escape => res.push('\n'),
+            'r' if in_escape => res.push('\r'),
+            '\\' if in_escape => res.push('\\'),
+            _ if in_escape => {
+                res.push('\\');
+                res.push(c);
             }
-            res.push('\\');
+            _ => {
+                res.push(c);
+            }
         }
-        res.push(c);
+        in_escape = false;
     }
     res
 }

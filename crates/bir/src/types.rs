@@ -16,6 +16,8 @@ pub struct Map {
 
     pub(crate) typedefs: IDMap<TypeDef>,
     pub(crate) modules: IDMap<Module>,
+    pub(crate) imports: IDMap<Import>,
+    pub(crate) names: IDMap<Name>,
     pub(crate) typerefs: IDMap<TypeRef>,
     pub(crate) functions: IDMap<Function>,
     pub(crate) literals: IDMap<Literal>,
@@ -76,6 +78,8 @@ impl_map_lookup_fns!(
     functions : Function  = fn_      | fn_mut
     typerefs  : TypeRef   = typeref  | typeref_mut
     typedefs  : TypeDef   = typedef  | typedef_mut
+    imports   : Import    = import   | import_mut
+    names     : Name      = name     | name_mut
     literals  : Literal   = lit      | lit_mut
     lets      : Let       = let_     | let_mut
     blocks    : Block     = block    | block_mut
@@ -87,8 +91,10 @@ impl_map_lookup_fns!(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
     Module,
+    Import,
     Function,
     Parameter,
+    Name,
     TypeRef,
     TypeDef,
     Block,
@@ -101,22 +107,26 @@ pub enum Kind {
 #[derive(Debug, Clone)]
 pub struct Module {
     pub id: ID,
-    pub name: Option<String>,
+    pub ident: Option<String>,
     pub functions: Vec<ID>,
     pub typedefs: Vec<ID>,
     pub modules: Vec<ID>,
+    pub imports: Vec<ID>,
     pub parent: Option<ID>,
+    pub imported: bool,
 }
 
 impl Module {
     pub fn new(id: ID) -> Self {
         Self {
             id,
-            name: None,
+            ident: None,
             functions: Vec::default(),
             typedefs: Vec::default(),
             modules: Vec::default(),
+            imports: Vec::default(),
             parent: None,
+            imported: false,
         }
     }
 
@@ -125,6 +135,13 @@ impl Module {
         map: &'map Map,
     ) -> impl Iterator<Item = &'map TypeDef> + 'this {
         self.typedefs.iter().map(|id| map.typedef(id))
+    }
+
+    pub fn imports<'this, 'map: 'this>(
+        &'this self,
+        map: &'map Map,
+    ) -> impl Iterator<Item = &'map Import> + 'this {
+        self.imports.iter().map(|id| map.import(id))
     }
 
     pub fn functions<'this, 'map: 'this>(
@@ -143,9 +160,22 @@ impl Module {
 }
 
 #[derive(Debug, Clone)]
+pub struct Import {
+    pub id: ID,
+    pub parent: ID,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct TypeRef {
     pub id: ID,
     pub kind: TypeRefKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct Name {
+    pub id: ID,
+    pub segments: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -158,7 +188,7 @@ pub struct TypeDef {
 
 #[derive(Debug, Clone)]
 pub struct TypeMember {
-    pub identifier: String,
+    pub ident: String,
     pub ty: ID,
 }
 
@@ -171,7 +201,7 @@ impl TypeMember {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeRefKind {
     Void,
-    Named { name: String },
+    Named { name: ID },
     Pointer { pointee: ID },
 }
 
@@ -184,6 +214,7 @@ pub struct Function {
     pub body: Option<ID>,
     pub return_type: ID,
     pub is_var_args: bool,
+    pub is_extern: bool,
 }
 
 impl Function {
@@ -192,7 +223,6 @@ impl Function {
         module: ID,
         identifier: String,
         return_type: ID,
-        is_var_args: bool,
     ) -> Self {
         Self {
             id,
@@ -201,7 +231,8 @@ impl Function {
             parameters: Vec::default(),
             body: None,
             return_type,
-            is_var_args,
+            is_var_args: false,
+            is_extern: false,
         }
     }
 
@@ -234,12 +265,12 @@ pub struct Parameter {
 }
 
 impl Parameter {
-    pub fn new(id: ID, function: ID, ty: ID, name: String) -> Self {
+    pub fn new(id: ID, function: ID, ty: ID, identifier: String) -> Self {
         Self {
             id,
             function,
             ty,
-            identifier: name,
+            identifier,
         }
     }
     pub fn function<'map>(&self, map: &'map Map) -> &'map Function {
@@ -332,7 +363,7 @@ pub enum ItemKind {
 #[derive(Debug, Clone)]
 pub struct Let {
     pub id: ID,
-    pub name: String,
+    pub ident: String,
     pub ty: Option<ID>,
     pub expr: Option<ID>,
 }
@@ -354,9 +385,9 @@ pub struct Expr {
 }
 
 impl Expr {
-    pub fn name(&self) -> Option<&str> {
-        if let ExprKind::NameRef { name } = &self.kind {
-            Some(name.as_str())
+    pub fn name<'map>(&self, map: &'map Map) -> Option<&'map Name> {
+        if let ExprKind::NameRef { id } = &self.kind {
+            Some(map.name(id))
         } else {
             None
         }
@@ -367,7 +398,7 @@ impl Expr {
 pub enum ExprKind {
     Literal(ID),
     NameRef {
-        name: String,
+        id: ID,
     },
     Cast {
         val: ID,
@@ -422,6 +453,13 @@ pub enum LoopKind {
 pub enum Literal {
     Number(usize),
     Str(String),
+    Struct(StructLiteral),
+}
+
+#[derive(Debug, Clone)]
+pub struct StructLiteral {
+    pub name: ID,
+    pub members: Vec<ID>,
 }
 
 #[derive(Debug, Clone)]
@@ -456,11 +494,11 @@ pub enum OpKind {
     Multiply,
     Divide,
     FieldAccess,
-    ScopeAccess,
     LessThan,
     LessThanEquals,
     GreaterThan,
     GreaterThanEquals,
+    NotEquals,
     Equals,
     Assignment,
 }

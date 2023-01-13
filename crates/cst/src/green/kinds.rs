@@ -3,10 +3,14 @@
 pub enum SyntaxKind {
     TOMBSTONE,
     ERROR,
+
     EOF,
+    EOL,
 
     MODULE,
+
     NAME,
+    DOTTED_NAME,
 
     BASIC_TYPE,
     POINTER_TYPE,
@@ -19,14 +23,13 @@ pub enum SyntaxKind {
     FN_ITEM,
     EXPR_ITEM,
     TYPE_ITEM,
+    IMPORT_ITEM,
 
     TYPE_MEMBER,
 
     IDENT,
-    NUMBER,
     WHITESPACE,
     COMMENT,
-    STRING,
 
     LEFT_PAREN,
     RIGHT_PAREN,
@@ -48,18 +51,24 @@ pub enum SyntaxKind {
     STAR,
     SLASH,
     DOT,
+    BANG,
 
     AMPERSAND_AMPERSAND,
     BAR_BAR,
     LEFT_ANGLE_EQUALS,
     RIGHT_ANGLE_EQUALS,
     EQUALS_EQUALS,
+    BANG_EQUALS,
     DASH_ARROW,
     COLON_COLON,
 
     DOT_DOT_DOT,
 
     LITERAL,
+    STRING,
+    NUMBER,
+    STRUCT_LITERAL,
+
     NAME_REF,
     PREFIX_EXPR,
     BIN_EXPR,
@@ -75,84 +84,20 @@ pub enum SyntaxKind {
     BREAK_EXPR,
     CONTINUE_EXPR,
 
-    MOD_KW,
-    TYPE_KW,
-    FN_KW,
-    LET_KW,
-    RETURN_KW,
-    IF_KW,
-    ELSE_KW,
-    LOOP_KW,
-    WHILE_KW,
+    AS_KW,
     BREAK_KW,
     CONTINUE_KW,
-    AS_KW,
-}
-use SyntaxKind::*;
-
-pub enum Subtokens {
-    One(SyntaxKind),
-    Two(SyntaxKind, SyntaxKind),
-    Three(SyntaxKind, SyntaxKind, SyntaxKind),
-}
-
-impl Subtokens {
-    pub fn number(&self) -> usize {
-        match *self {
-            Self::One(..) => 1,
-            Self::Two(..) => 2,
-            Self::Three(..) => 3,
-        }
-    }
-}
-
-impl SyntaxKind {
-    pub fn is_trivia(&self) -> bool {
-        match self {
-            WHITESPACE | COMMENT => true,
-            _ => false,
-        }
-    }
-    pub fn subtokens(&self) -> Subtokens {
-        match *self {
-            EQUALS_EQUALS => Subtokens::Two(EQUALS, EQUALS),
-            AMPERSAND_AMPERSAND => Subtokens::Two(AMPERSAND, AMPERSAND),
-            LEFT_ANGLE_EQUALS => Subtokens::Two(LEFT_ANGLE, EQUALS),
-            RIGHT_ANGLE_EQUALS => Subtokens::Two(RIGHT_ANGLE, EQUALS),
-            BAR_BAR => Subtokens::Two(BAR, BAR),
-            DASH_ARROW => Subtokens::Two(DASH, RIGHT_ANGLE),
-            COLON_COLON => Subtokens::Two(COLON, COLON),
-            DOT_DOT_DOT => Subtokens::Three(DOT, DOT, DOT),
-            token => Subtokens::One(token),
-        }
-    }
-    pub fn terminated_by_semicolon(&self) -> bool {
-        match *self {
-            LITERAL | NAME_REF | PREFIX_EXPR | BIN_EXPR | PAREN_EXPR
-            | BLOCK_EXPR | RETURN_EXPR | INDEX_EXPR | CALL_EXPR
-            | BREAK_EXPR | CONTINUE_EXPR => true,
-            IF_EXPR | LOOP_EXPR | WHILE_EXPR => false,
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn is_operator(&self) -> bool {
-        match *self {
-            LEFT_ANGLE | RIGHT_ANGLE | AMPERSAND | EQUALS | BAR | DASH
-            | PLUS | STAR | SLASH | DOT | AMPERSAND_AMPERSAND | BAR_BAR
-            | LEFT_ANGLE_EQUALS | RIGHT_ANGLE_EQUALS | EQUALS_EQUALS
-            | COLON_COLON | DASH_ARROW | DOT_DOT_DOT => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_keyword(&self) -> bool {
-        match *self {
-            MOD_KW | TYPE_KW | FN_KW | LET_KW | RETURN_KW | IF_KW | ELSE_KW
-            | LOOP_KW | WHILE_KW | BREAK_KW | CONTINUE_KW | AS_KW => true,
-            _ => false,
-        }
-    }
+    ELSE_KW,
+    EXTERN_KW,
+    FN_KW,
+    IF_KW,
+    IMPORT_KW,
+    LET_KW,
+    LOOP_KW,
+    WHILE_KW,
+    MOD_KW,
+    RETURN_KW,
+    TYPE_KW,
 }
 
 #[macro_export]
@@ -214,11 +159,17 @@ macro_rules! T {
     (.) => {
         crate::SyntaxKind::DOT
     };
+    (!) => {
+        crate::SyntaxKind::BANG
+    };
     (&&) => {
         crate::SyntaxKind::AMPERSAND_AMPERSAND
     };
     (==) => {
         crate::SyntaxKind::EQUALS_EQUALS
+    };
+    (!=) => {
+        crate::SyntaxKind::BANG_EQUALS
     };
     (>=) => {
         crate::SyntaxKind::RIGHT_ANGLE_EQUALS
@@ -240,6 +191,9 @@ macro_rules! T {
     };
     (mod) => {
         crate::SyntaxKind::MOD_KW
+    };
+    (import) => {
+        crate::SyntaxKind::IMPORT_KW
     };
     (type) => {
         crate::SyntaxKind::TYPE_KW
@@ -274,4 +228,111 @@ macro_rules! T {
     (as) => {
         crate::SyntaxKind::AS_KW
     };
+    (extern) => {
+        crate::SyntaxKind::EXTERN_KW
+    };
+}
+
+pub enum Subtokens {
+    One(SyntaxKind),
+    Two(SyntaxKind, SyntaxKind),
+    Three(SyntaxKind, SyntaxKind, SyntaxKind),
+}
+
+impl Subtokens {
+    pub fn number(&self) -> usize {
+        match *self {
+            Self::One(..) => 1,
+            Self::Two(..) => 2,
+            Self::Three(..) => 3,
+        }
+    }
+}
+
+impl SyntaxKind {
+    pub fn is_keyword(&self) -> bool {
+        match *self {
+            Self::MOD_KW
+            | Self::IMPORT_KW
+            | Self::TYPE_KW
+            | Self::FN_KW
+            | Self::LET_KW
+            | Self::RETURN_KW
+            | Self::IF_KW
+            | Self::ELSE_KW
+            | Self::LOOP_KW
+            | Self::WHILE_KW
+            | Self::BREAK_KW
+            | Self::CONTINUE_KW
+            | Self::AS_KW
+            | Self::EXTERN_KW => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_operator(&self) -> bool {
+        match *self {
+            T![<]
+            | T![>]
+            | T![&]
+            | T![=]
+            | T![|]
+            | T![-]
+            | T![+]
+            | T![*]
+            | T![/]
+            | T![.]
+            | T![&&]
+            | T![||]
+            | T![<=]
+            | T![>=]
+            | T![==]
+            | T![!=]
+            | T![::]
+            | T![->]
+            | T![...] => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_trivia(&self) -> bool {
+        match self {
+            Self::EOL | Self::WHITESPACE | Self::COMMENT => true,
+            _ => false,
+        }
+    }
+
+    pub fn subtokens(&self) -> Subtokens {
+        use Subtokens::*;
+        match *self {
+            T![==] => Two(T![=], T![=]),
+            T![!=] => Two(T![!], T![=]),
+            T![&&] => Two(T![&], T![&]),
+            T![<=] => Two(T![<], T![=]),
+            T![>=] => Two(T![>], T![=]),
+            T![||] => Two(T![|], T![|]),
+            T![->] => Two(T![-], T![>]),
+            T![::] => Two(T![:], T![:]),
+            T![...] => Three(T![.], T![.], T![.]),
+            _ => One(*self),
+        }
+    }
+
+    pub fn terminated_by_semicolon(&self) -> bool {
+        match *self {
+            Self::LITERAL
+            | Self::NAME_REF
+            | Self::PREFIX_EXPR
+            | Self::BIN_EXPR
+            | Self::PAREN_EXPR
+            | Self::BLOCK_EXPR
+            | Self::RETURN_EXPR
+            | Self::INDEX_EXPR
+            | Self::CALL_EXPR
+            | Self::BREAK_EXPR
+            | Self::CONTINUE_EXPR => true,
+            Self::IF_EXPR | Self::LOOP_EXPR | Self::WHILE_EXPR => false,
+            _ => unreachable!(),
+        }
+    }
 }

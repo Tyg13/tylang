@@ -6,10 +6,9 @@ pub trait Visitor<'bir>: Sized {
         self.visit_module(self.map().root_module())
     }
     fn visit_module(&mut self, mod_: &Module) {
-        walk_modules(self, mod_);
-        walk_typedefs(self, mod_);
-        walk_functions(self, mod_);
+        walk_module(self, mod_);
     }
+    fn visit_import(&mut self, _: &Import) {}
     fn visit_function(&mut self, fn_: &Function) {
         walk_param_list(self, fn_);
     }
@@ -17,15 +16,31 @@ pub trait Visitor<'bir>: Sized {
         walk_param(self, param);
     }
     fn visit_block(&mut self, scope: &Block) {
-        walk_scope(self, scope);
+        walk_block(self, scope);
     }
     fn visit_item(&mut self, item: &Item) {
         walk_item(self, item);
     }
-    fn visit_let(&mut self, _: &Let) {}
-    fn visit_expr(&mut self, _: &Expr) {}
+    fn visit_let(&mut self, let_: &Let) {}
+    fn visit_expr(&mut self, expr: &Expr) {
+        walk_expr(self, expr);
+    }
     fn visit_typeref(&mut self, _: &TypeRef) {}
     fn visit_typedef(&mut self, _: &TypeDef) {}
+    fn visit_name(&mut self, _: &Name) {}
+}
+
+pub fn walk_module<'bir>(v: &mut impl Visitor<'bir>, mod_: &Module) {
+    walk_imports(v, mod_);
+    walk_modules(v, mod_);
+    walk_typedefs(v, mod_);
+    walk_functions(v, mod_);
+}
+
+pub fn walk_imports<'bir>(v: &mut impl Visitor<'bir>, mod_: &Module) {
+    for import in mod_.imports(v.map()) {
+        v.visit_import(import);
+    }
 }
 
 pub fn walk_modules<'bir>(v: &mut impl Visitor<'bir>, mod_: &Module) {
@@ -63,7 +78,14 @@ pub fn walk_item<'bir>(v: &mut impl Visitor<'bir>, item: &Item) {
     }
 }
 
-pub fn walk_scope<'bir>(v: &mut impl Visitor<'bir>, scope: &Block) {
+pub fn walk_expr<'bir>(v: &mut impl Visitor<'bir>, expr: &Expr) {
+    match expr.kind {
+        ExprKind::NameRef { id: name } => v.visit_name(v.map().name(&name)),
+        _ => {}
+    }
+}
+
+pub fn walk_block<'bir>(v: &mut impl Visitor<'bir>, scope: &Block) {
     for item in scope.items(v.map()) {
         v.visit_item(item);
     }

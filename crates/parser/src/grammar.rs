@@ -1,6 +1,8 @@
+use crate::CompletedMarker;
+
 use super::Parser;
-use crate::SyntaxKind::{self, *};
-use crate::T;
+use cst::SyntaxKind::{self, *};
+use cst::T;
 
 mod expressions;
 mod items;
@@ -27,6 +29,9 @@ pub(super) fn entry_point(parser: &mut Parser<'_>, entry: EntryPoint) {
 
 fn module(parser: &mut Parser<'_>, inner_module: bool) {
     let m = parser.start_node();
+
+    parser.advance_to_next_non_trivia();
+
     if inner_module {
         parser.expect_token(T![mod]);
         parser.expect_token(IDENT);
@@ -35,25 +40,44 @@ fn module(parser: &mut Parser<'_>, inner_module: bool) {
     loop {
         match parser.advance_to_next_non_trivia() {
             T![mod] => module(parser, true),
+            T![import] => items::import_item(parser),
             T![let] => items::let_item(parser),
             T![fn] => items::fn_item(parser),
             T![type] => items::type_item(parser),
-            T!['}'] if inner_module => break,
-            EOF => break,
+            T!['}'] => {
+                if inner_module {
+                    break;
+                } else {
+                    parser.unexpected(T!['}'])
+                }
+            }
+            EOF => {
+                if inner_module {
+                    parser.unexpected(EOF);
+                }
+                break;
+            }
             _ => items::expr_item(parser),
         }
     }
     if inner_module {
         parser.expect_token(T!['}']);
     }
+
     m.complete(parser, MODULE);
 }
 
-// TODO: are there usages of name that are unnecessary (why can't we just use IDENT?)
-fn name(parser: &mut Parser<'_>) {
-    parser.node(NAME, |parser| {
-        parser.expect_token(IDENT);
-    });
+fn name(parser: &mut Parser<'_>) -> CompletedMarker {
+    parser.advance_to_next_non_trivia();
+    let m = parser.start_node();
+    parser.expect_token(IDENT);
+    if parser.maybe(T![::]) {
+        parser.expect_token(T![::]);
+        name(parser);
+        m.complete(parser, DOTTED_NAME)
+    } else {
+        m.complete(parser, NAME)
+    }
 }
 
 fn type_(parser: &mut Parser<'_>) {
@@ -66,23 +90,23 @@ fn type_(parser: &mut Parser<'_>) {
         }
         _ => {
             parser.node(BASIC_TYPE, |parser| {
-                parser.expect_token(IDENT);
+                name(parser);
             });
         }
     }
 }
 
 fn param_list(parser: &mut Parser<'_>) {
-    parser.node(PARAM_LIST, |this| {
-        this.with_follow_set(&[T!['(']], |parser| {
-            parser.expect_token(T!['(']);
+    parser.node(PARAM_LIST, |parser| {
+        parser.expect_token(T!['(']);
+        parser.with_follow_set(&[T![')']], |parser| {
             loop {
                 parser.add_to_follow_set(&[T![:], T![,]]);
                 match parser.advance_to_next_non_trivia() {
                     T![')'] | EOF => break,
                     T![.] => {
                         parser.node(VA_PARAM, |parser| {
-                            parser.expect_token(T![...])
+                            parser.expect_token(T![...]);
                         });
                         break;
                     }
@@ -94,8 +118,8 @@ fn param_list(parser: &mut Parser<'_>) {
                     }
                 }
             }
-            parser.expect_token(T![')']);
         });
+        parser.expect_token(T![')']);
     });
 }
 

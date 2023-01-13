@@ -11,6 +11,7 @@ utils = { path = "../utils/" }
 ast = { path = "../ast/" }
 codegen = { path = "../codegen/" }
 cst = { path = "../cst/" }
+parser = { path = "../parser/" }
 bir = { path = "../bir/" }
 lir = { path = "../lir/" }
 sema = { path = "../sema/" }

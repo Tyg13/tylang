@@ -7,7 +7,7 @@ struct Builder<'source> {
     position: Position,
     source: &'source str,
     token_lens: Vec<usize>,
-    errors: Vec<(String, Position)>,
+    errors: Vec<Error>,
     context_stack: Vec<SyntaxKind>,
 }
 impl<'source> EventSink for Builder<'source> {
@@ -34,27 +34,33 @@ impl<'source> EventSink for Builder<'source> {
     }
 
     fn error(&mut self, msg: String) {
-        let position = self.position;
-        if let Some((_, last_position)) = self.errors.last() && *last_position == position {
-            // Avoid stacking redundant errors on the same position
-            return;
+        let pos = self.position;
+        if let Some(Error { pos: last, .. }) = self.errors.last() {
+            if *last == pos {
+                // Avoid stacking redundant errors on the same position
+                return;
+            }
         }
         let context = self
             .context_stack
             .last()
             .map(|c| format!(" in {c:?}"))
-            .unwrap_or("".to_string());
-        self.errors.push((format!("{msg}{context}"), position));
+            .unwrap_or_default();
+        self.errors.push(Error {
+            msg: format!("{msg}{context}"),
+            pos,
+            len: self.token_lens[self.token_index],
+        });
     }
 }
 impl<'tokens> Builder<'tokens> {
     fn new(
         source: &'tokens str,
         token_lens: Vec<usize>,
-        token_cache: crate::lexer::TokenCache,
+        token_cache: cst::lexer::TokenCache,
     ) -> Self {
         Self {
-            builder: crate::syntax::Builder::new_with_cache(token_cache),
+            builder: cst::syntax::Builder::new_with_cache(token_cache),
             token_index: 0,
             position: Position {
                 offset: 0,
@@ -90,32 +96,28 @@ impl<'tokens> Builder<'tokens> {
         }
     }
 
-    fn finish(self) -> (syntax::Node, Vec<Error>) {
-        (
-            self.builder.finish(),
-            self.errors
-                .into_iter()
-                .map(|(msg, pos)| Error { msg, pos })
-                .collect(),
-        )
+    fn finish(self) -> Output {
+        Output {
+            root: self.builder.finish(),
+            errors: self.errors,
+        }
     }
 }
 
 pub(crate) fn parse(
-    mut input: crate::parser::input::Input,
+    input: crate::input::Input,
     entry: grammar::EntryPoint,
 ) -> Output {
     let mut builder =
-        Builder::new(input.source, input.token_lens, input.token_cache);
-    parse_impl(entry, &mut input.tokens, &mut builder);
-    let (root, errors) = builder.finish();
-    Output { root, errors }
+        Builder::new(input.text, input.token_lens, input.token_cache);
+    parse_impl(entry, &input.tokens, &mut builder);
+    builder.finish()
 }
 
 fn parse_impl(
     entry: grammar::EntryPoint,
-    token_source: &mut dyn TokenSource,
-    event_sink: &mut dyn EventSink,
+    token_source: &impl TokenSource,
+    event_sink: &mut impl EventSink,
 ) {
     let mut events = Parser::new(token_source).parse(entry);
     let mut nodes = Vec::new();
@@ -159,7 +161,7 @@ fn parse_impl(
                         _ => panic!("parent {idx} was not a node"),
                     }
                 }
-                // Now push all non-dead node parents.
+                // Now push this node and all non-dead node parents.
                 for kind in nodes.drain(..).rev() {
                     if kind != TOMBSTONE {
                         event_sink.start_node(kind);
@@ -177,10 +179,4 @@ fn parse_impl(
 pub struct Output {
     pub root: syntax::Node,
     pub errors: Vec<Error>,
-}
-
-#[derive(Debug)]
-pub struct Error {
-    pub msg: String,
-    pub pos: Position,
 }

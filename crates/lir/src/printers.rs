@@ -2,15 +2,17 @@ use crate::types::*;
 use std::{collections::HashSet, fmt::Write};
 
 const DEBUG_VALUE_NUMS: bool = false;
+const DEBUG_VALUE_TYS: bool = false;
 const DEBUG_USERS: bool = false;
+const DEBUG_UNREACHABLE: bool = false;
 
-struct Writer {
+pub struct Writer {
     buf: String,
     indent_str: String,
 }
 
 impl Writer {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             buf: String::new(),
             indent_str: String::new(),
@@ -26,7 +28,7 @@ impl Writer {
     }
 
     fn last_was_newline(&self) -> bool {
-        self.buf.chars().last().map(|c| c == '\n').unwrap_or(false)
+        self.buf.chars().last().map_or(false, |c| c == '\n')
     }
 }
 
@@ -40,7 +42,7 @@ impl std::fmt::Write for Writer {
 }
 
 pub fn print(lir: &Module) {
-    let mod_ = &lir;
+    let mod_ = lir;
     println!("{}", to_string(mod_));
     if DEBUG_USERS {
         dump_users(mod_);
@@ -58,7 +60,7 @@ pub fn dump_users(mod_: &Module) {
             }
             print!("{indent}{}: ", val.id);
             let user_sep = utils::ListSeparator::comma_space();
-            for user in f.users(&val.id) {
+            for user in f.locals.users(&val.id) {
                 print!("{user_sep}{}", user);
             }
             println!()
@@ -72,7 +74,19 @@ pub fn to_string(mod_: &Module) -> String {
     writer.buf
 }
 
-fn write_mod(w: &mut Writer, mod_: &Module) -> std::fmt::Result {
+pub fn write_mod(w: &mut Writer, mod_: &Module) -> std::fmt::Result {
+    for t in mod_.types.iter() {
+        if let TyKind::Struct = t.kind {
+            let struct_ty = t.as_struct_ty(mod_);
+            let member_str = struct_ty
+                .members
+                .iter()
+                .map(|id| mod_.types.get(id).repr(mod_))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(w, "type {} = {};", struct_ty.name, member_str)?;
+        }
+    }
     let ls = utils::ListSeparator::nl();
     for f in &mod_.functions {
         write!(w, "{ls}")?;
@@ -81,7 +95,14 @@ fn write_mod(w: &mut Writer, mod_: &Module) -> std::fmt::Result {
     Ok(())
 }
 
-fn write_fn(w: &mut Writer, c: Context, f: &Function) -> std::fmt::Result {
+pub fn print_fn(m: &Module, f: &Function) -> std::fmt::Result {
+    let mut w = Writer::new();
+    write_fn(&mut w, Context::full(m, f), f)?;
+    eprintln!("{}", w.buf);
+    Ok(())
+}
+
+pub fn write_fn(w: &mut Writer, c: Context, f: &Function) -> std::fmt::Result {
     if DEBUG_VALUE_NUMS {
         write!(w, "({}) ", f.id)?;
     }
@@ -92,14 +113,18 @@ fn write_fn(w: &mut Writer, c: Context, f: &Function) -> std::fmt::Result {
         let ty = param.val.ty(c).repr(c);
         write!(w, "{ls}{name}: {ty}")?;
         if DEBUG_VALUE_NUMS {
-            write!(w, " ({})", param.val.id)?;
+            write!(w, " ({})", param.val)?;
         }
     }
-    if f.is_var_args {
+    if f.ty(c).as_fn_ty().is_var_args {
         write!(w, ", ...")?;
     }
     write!(w, ")")?;
     write!(w, " -> {}", f.return_ty(c).repr(c))?;
+
+    if DEBUG_VALUE_TYS {
+        write!(w, " (ty: {})", f.ty(c).id.0)?;
+    }
 
     if f.insts.is_empty() {
         write!(w, ";")?;
@@ -108,17 +133,23 @@ fn write_fn(w: &mut Writer, c: Context, f: &Function) -> std::fmt::Result {
 
     writeln!(w, " {{")?;
 
-    let mut unreachable: HashSet<_> = f.blocks().collect();
-    f.visit_blocks_in_rpo(|block| {
-        unreachable.remove(&block);
-        write_block(block, f, w, c).unwrap();
-    });
+    if DEBUG_UNREACHABLE {
+        let mut unreachable: HashSet<_> = f.blocks().collect();
+        f.visit_blocks_in_rpo(|block| {
+            unreachable.remove(&block);
+            write_block(block, f, w, c).unwrap();
+        });
 
-    if !unreachable.is_empty() {
-        for block in unreachable {
-            write!(w, "[[unreachable]] ")?;
-            write_block(block, f, w, c)?;
+        if !unreachable.is_empty() {
+            for block in unreachable {
+                write!(w, "[[unreachable]] ")?;
+                write_block(block, f, w, c)?;
+            }
         }
+    } else {
+        f.visit_blocks_in_rpo(|block| {
+            write_block(block, f, w, c).unwrap();
+        });
     }
 
     write!(w, "}}")?;
@@ -126,14 +157,14 @@ fn write_fn(w: &mut Writer, c: Context, f: &Function) -> std::fmt::Result {
     Ok(())
 }
 
-fn write_block(
+pub fn write_block(
     block: Block,
     f: &Function,
     w: &mut Writer,
     c: Context,
 ) -> std::fmt::Result {
-    write_val(w, c, &block.val(c))?;
-    writeln!(w)?;
+    write_val(w, c, &block.val(f))?;
+    writeln!(w, ":")?;
     w.indent();
     let mut any_insts = false;
     for inst in block.insts(f) {
@@ -147,7 +178,11 @@ fn write_block(
     Ok(())
 }
 
-fn write_inst(w: &mut Writer, ctx: Context, inst: &Inst) -> std::fmt::Result {
+pub fn write_inst(
+    w: &mut Writer,
+    ctx: Context,
+    inst: &Inst,
+) -> std::fmt::Result {
     if DEBUG_VALUE_NUMS {
         write!(w, "({}): ", inst.val.id)?;
     }
@@ -202,14 +237,6 @@ fn write_inst(w: &mut Writer, ctx: Context, inst: &Inst) -> std::fmt::Result {
             writeln!(w, ")")?;
             return Ok(());
         }
-        InstKind::Offset => {
-            write!(w, "&")?;
-            write_val(w, ctx, &inst.rvals[0])?;
-            write!(w, "[")?;
-            write_val(w, ctx, &inst.rvals[1])?;
-            writeln!(w, "]")?;
-            return Ok(());
-        }
         InstKind::Load => {
             write_val(w, ctx, &inst.rvals[0])?;
             writeln!(w, "^")?;
@@ -229,6 +256,7 @@ fn write_inst(w: &mut Writer, ctx: Context, inst: &Inst) -> std::fmt::Result {
             write_val(w, ctx, &inst.rvals[0])?;
             match kind {
                 CmpKind::Eq => write!(w, " == ")?,
+                CmpKind::Ne => write!(w, " != ")?,
                 CmpKind::Gt => write!(w, " > ")?,
                 CmpKind::Lt => write!(w, " < ")?,
                 CmpKind::Gte => write!(w, " >= ")?,
@@ -247,6 +275,7 @@ fn write_inst(w: &mut Writer, ctx: Context, inst: &Inst) -> std::fmt::Result {
         InstKind::Mul => write!(w, "mul")?,
         InstKind::Div => write!(w, "div")?,
         InstKind::Subscript => write!(w, "subscript")?,
+        InstKind::GetField => write!(w, "field")?,
     };
 
     write!(w, " ")?;
@@ -261,7 +290,11 @@ fn write_inst(w: &mut Writer, ctx: Context, inst: &Inst) -> std::fmt::Result {
     Ok(())
 }
 
-fn write_val(w: &mut Writer, ctx: Context, val: &ValueRef) -> std::fmt::Result {
+pub fn write_val(
+    w: &mut Writer,
+    ctx: Context,
+    val: &ValueRef,
+) -> std::fmt::Result {
     write!(w, "{}", val.repr(ctx.clone()))?;
     if DEBUG_VALUE_NUMS {
         write!(w, " ({})", val.id)?;

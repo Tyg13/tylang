@@ -2,14 +2,18 @@ use crate::{
     errors::{Error, ErrorKind},
     types::*,
 };
+use std::assert_matches::debug_assert_matches;
 
 struct Checker<'bir> {
     map: Map,
     bir: &'bir bir::Map,
 
     current_namespace: Option<ID>,
+    current_function: Option<ID>,
     global_namespace: Option<ID>,
     based_types: Vec<BasedType>,
+
+    check_namespace_parents: bool,
 }
 
 impl<'bir> Checker<'bir> {
@@ -18,40 +22,32 @@ impl<'bir> Checker<'bir> {
             map: Map::default(),
             bir,
             current_namespace: None,
+            current_function: None,
             global_namespace: None,
             based_types: Default::default(),
+            check_namespace_parents: true,
         }
     }
 }
 
 impl Checker<'_> {
+    fn bir_to_id(&self, bir: &bir::ID) -> ID {
+        self.map
+            .bir_to_id(bir)
+            .expect(&format!("no sema for bir {bir:?}"))
+    }
+
     fn current_ns(&mut self) -> NamespaceHandle<'_> {
         self.map
             .ns_mut(self.current_namespace.expect("No current namespace set!"))
             .expect("current namespace ID has no associated namespace!")
     }
 
-    fn walk_ns_and_parents<R>(
-        &self,
-        ns: Option<ID>,
-        f: impl Fn(ID) -> Option<R>,
-    ) -> Option<R> {
-        let mut current_ns = ns;
-        while let Some(ns) = current_ns {
-            if let Some(res) = f(ns) {
-                return Some(res);
-            }
-            current_ns = self.map.parent(ns);
-        }
-        None
-    }
-
     fn current_fn(&self) -> &Function {
-        self.walk_ns_and_parents(self.current_namespace, |ns| {
-            (self.map.kind(ns) == Kind::Function)
-                .then(|| self.map.fn_(ns).unwrap())
-        })
-        .expect("Not in a function context!")
+        let id = self.current_function.expect("Not in a function context!");
+        self.map
+            .fn_(id)
+            .expect("Current function is not a function?")
     }
 
     fn new_marker_ty(&mut self) -> ID {
@@ -92,35 +88,39 @@ impl Checker<'_> {
         debug_assert!(self.map.ns(ns).is_some());
 
         let old_ns = self.current_namespace;
+        let old_fn = self.current_function;
+
         self.current_namespace = Some(ns);
+        if self.map.kind(ns) == Kind::Function {
+            self.current_function = Some(ns);
+        }
+
         let res = f(self);
+
         self.current_namespace = old_ns;
+        self.current_function = old_fn;
 
         res
     }
 
-    fn lookup_ref(&self, ident: &str) -> Option<&Name> {
-        let mut curr = self.current_namespace;
-        while let Some(ns) = curr {
-            match self.lookup_in(ns, ident) {
-                Some(name) => return Some(name),
-                None => curr = self.map.parent(ns),
-            }
-        }
-        None
+    fn lookup_ref(&self, name: &bir::ID) -> Option<ID> {
+        self.lookup_in(self.current_namespace?, name)
     }
 
-    fn lookup_ty(&self, ident: &str) -> Option<&Name> {
-        for ns in &[self.current_namespace, self.global_namespace] {
-            if let Some(name) = ns.and_then(|ns| self.lookup_in(ns, ident)) {
-                return Some(name);
-            }
+    fn lookup_in(&self, mut ns: ID, name: &bir::ID) -> Option<ID> {
+        let name = self.bir.name(name);
+        assert!(name.segments.len() > 0);
+        let mut result = None;
+        for ident in name.segments.iter() {
+            let id = self
+                .map
+                .ns(ns)?
+                .lookup(&self.map, ident, self.check_namespace_parents)?
+                .id;
+            result = Some(id);
+            ns = id;
         }
-        None
-    }
-
-    fn lookup_in(&self, ns: ID, ident: &str) -> Option<&Name> {
-        self.map.ns(ns).unwrap().lookup(&self.map, ident)
+        result
     }
 
     fn ty_id(&self, id: ID) -> ID {
@@ -138,14 +138,17 @@ impl Checker<'_> {
         param_types: Vec<ID>,
         is_var_args: bool,
     ) -> PrototypeFn {
-        debug_assert!(self.map.ty_id(return_ty).is_some());
+        debug_assert_matches!(
+            self.map.kind(return_ty),
+            Kind::Type | Kind::Error
+        );
         debug_assert!(
             param_types.iter().all(|id| self.map.ty_id(*id).is_some())
         );
 
         let ty = {
-            let return_ty = self.map.ty_id(return_ty).unwrap();
-            // TODO should re-use existing function types with same ret/params (use based_types)
+            let return_ty = self.map.ty_id(return_ty).unwrap_or(return_ty);
+            // TODO should re-use existing function types with same ret/params (use FoldingSet)
             self.current_ns().new_ty(
                 None,
                 TypeKind::Function(FunctionType {
@@ -188,6 +191,9 @@ impl Checker<'_> {
             | ErrorKind::UnknownCall
             | ErrorKind::InvalidPointeeType
             | ErrorKind::ParamAssignment
+            | ErrorKind::InvalidField
+            | ErrorKind::InvalidCallReceiver
+            | ErrorKind::InvalidFieldReceiver
             | ErrorKind::CallToNonFnType => vec![ids[0]],
             ErrorKind::Unification | ErrorKind::InvalidIndexType => {
                 vec![ids[0], ids[1]]
@@ -221,9 +227,10 @@ impl Checker<'_> {
                 .iter()
                 .all(|id| self.map.kind(*id) == Kind::TypeMember)
         );
+        let id = proto.id;
         proto.finish(
             &mut self.map,
-            TypeKind::Aggregate(AggregateType { members }),
+            TypeKind::Aggregate(AggregateType { id, members }),
         )
     }
 
@@ -246,6 +253,13 @@ impl Checker<'_> {
                     return Some(sink);
                 }
 
+                if is_err(self, sink) {
+                    return Some(src);
+                }
+                if is_err(self, src) {
+                    return Some(sink);
+                }
+
                 if is_marker(self, sink) {
                     self.map.resolve_marker(sink, src);
                     return Some(src);
@@ -253,13 +267,6 @@ impl Checker<'_> {
 
                 if is_marker(self, src) {
                     self.map.resolve_marker(src, sink);
-                    return Some(sink);
-                }
-
-                if is_err(self, sink) {
-                    return Some(src);
-                }
-                if is_err(self, src) {
                     return Some(sink);
                 }
 
@@ -354,7 +361,7 @@ pub fn check(bir: &bir::Map) -> Map {
     }
 
     for fn_ in fns {
-        check_fn_inner(&mut ck, fn_);
+        let _ = check_fn_inner(&mut ck, fn_);
     }
 
     if !ck.map.any_errors() {
@@ -370,9 +377,9 @@ fn check_ty_inner(ck: &mut Checker, ty: PrototypeTy) {
         let members = def
             .members
             .iter()
-            .map(|member| {
-                let ty = check_typeref(ck, member.ty(ck.bir));
-                ck.current_ns().new_ty_member(&member.identifier, ty)
+            .map(|m| {
+                let member_ty = check_typeref(ck, m.ty(ck.bir));
+                ck.current_ns().new_ty_member(&m.ident, member_ty)
             })
             .collect();
         ck.finish_ty_proto(ty, members);
@@ -381,25 +388,28 @@ fn check_ty_inner(ck: &mut Checker, ty: PrototypeTy) {
 
 fn create_modules(ck: &mut Checker) {
     // Walk the module tree and create an empty module for each
-    create_mod_and_children(ck, None, ck.bir.root_module());
+    let root = create_mod_and_children(ck, ck.bir.root_module(), None);
+    ck.global_namespace = Some(root);
 
     fn create_mod_and_children(
         ck: &mut Checker,
-        parent: Option<ID>,
         mod_: &bir::Module,
-    ) {
+        parent: Option<ID>,
+    ) -> ID {
         let m = if let Some(parent) = parent {
-            ck.map.ns_mut(parent).unwrap().id
+            ck.map
+                .ns_mut(parent)
+                .unwrap()
+                .new_module(mod_.ident.as_deref())
         } else {
-            let m = ck.map.new_node(Kind::Module);
-            ck.global_namespace = Some(m);
-            m
+            ck.map.new_node(Kind::Module)
         };
         ck.map.set_bir(m, mod_.id);
 
         for mod_ in mod_.modules(ck.bir) {
-            create_mod_and_children(ck, Some(m), mod_);
+            create_mod_and_children(ck, mod_, Some(m));
         }
+        m
     }
 }
 
@@ -408,7 +418,7 @@ fn check_prototype_tys(ck: &mut Checker, bir: &bir::Map) -> Vec<PrototypeTy> {
         Vec::with_capacity(ck.bir.modules().map(|m| m.typedefs.len()).sum());
     for mod_ in bir.modules() {
         for ty in mod_.typedefs(ck.bir) {
-            let mod_ = ck.map.bir_to_id(&ty.mod_).unwrap();
+            let mod_ = ck.bir_to_id(&ty.mod_);
             let proto =
                 ck.in_ns(mod_, |ck| ck.new_ty_proto(ty.id, &ty.identifier));
             prototype_tys.push(proto);
@@ -422,7 +432,7 @@ fn check_prototype_fns(ck: &mut Checker, bir: &bir::Map) -> Vec<PrototypeFn> {
         Vec::with_capacity(ck.bir.modules().map(|m| m.functions.len()).sum());
     for mod_ in bir.modules() {
         for fn_ in mod_.functions(ck.bir) {
-            let mod_ = ck.map.bir_to_id(&fn_.mod_).unwrap();
+            let mod_ = ck.bir_to_id(&fn_.mod_);
             let proto = ck.in_ns(mod_, |ck| {
                 let param_types = fn_
                     .parameters(&ck.bir)
@@ -463,7 +473,7 @@ fn add_builtin_tys(ck: &mut Checker) {
     add_ty(ck, "i32", TypeKind::Integer { size: 32 });
 }
 
-fn check_fn_inner(ck: &mut Checker, proto: PrototypeFn) {
+fn check_fn_inner(ck: &mut Checker, proto: PrototypeFn) -> Result<ID, ID> {
     ck.in_ns(proto.id, |ck| {
         let fn_ = ck.bir.fn_(&proto.bir);
         let fn_ty = ck.map.ty(proto.id).unwrap().as_fn_ty();
@@ -487,9 +497,9 @@ fn check_fn_inner(ck: &mut Checker, proto: PrototypeFn) {
         let id = ck.finish_fn_proto(proto, params);
 
         if let Some(body) = fn_.body(ck.bir) {
-            let scope_ = check_block(ck, body);
+            let scope_ = check_block(ck, body)?;
             if ck.unify(fn_ty.return_ty, scope_).is_none() {
-                let b_id = body
+                let ctx_id = body
                     .return_expr(ck.bir)
                     .map(|expr| expr.id)
                     .or_else(|| body.items(ck.bir).last().map(|item| item.id))
@@ -497,21 +507,20 @@ fn check_fn_inner(ck: &mut Checker, proto: PrototypeFn) {
                 ck.set_err(
                     scope_,
                     ErrorKind::Unification,
-                    &[ret_id, ck.map.bir_to_id(&b_id).unwrap()],
+                    &[ret_id, ck.bir_to_id(&ctx_id)],
                 );
             }
         }
 
-        id
-    });
+        Ok(id)
+    })
 }
 
 fn check_typeref(ck: &mut Checker, tyref: &bir::TypeRef) -> ID {
     match &tyref.kind {
         bir::TypeRefKind::Void => ck.void_type(),
         bir::TypeRefKind::Named { name } => ck
-            .lookup_ty(&name)
-            .map(|name| name.ty(&ck.map).unwrap().id)
+            .lookup_ref(name)
             .unwrap_or_else(|| ck.err(ErrorKind::UnknownType, tyref.id)),
         bir::TypeRefKind::Pointer { pointee } => {
             let pointee = check_typeref(ck, ck.bir.typeref(&pointee));
@@ -521,59 +530,69 @@ fn check_typeref(ck: &mut Checker, tyref: &bir::TypeRef) -> ID {
     }
 }
 
-fn check_block<'bir>(ck: &mut Checker<'bir>, scope: &'bir bir::Block) -> ID {
+fn check_block<'bir>(
+    ck: &mut Checker<'bir>,
+    scope: &'bir bir::Block,
+) -> Result<ID, ID> {
     let id = ck.current_ns().new_block();
     ck.in_ns(id, |ck| {
         for item in scope.items(ck.bir) {
-            check_item(ck, item);
+            check_item(ck, item)?;
         }
 
-        let ty = scope
-            .return_expr(ck.bir)
-            .map(|expr| {
-                let expr = check_expr(ck, expr);
-                ck.ty_id(expr)
-            })
-            .unwrap_or(ck.void_type());
+        let ty = if let Some(expr) = scope.return_expr(ck.bir) {
+            let id = check_expr(ck, expr)?;
+            ck.ty_id(id)
+        } else {
+            ck.void_type()
+        };
         ck.map.set_ty(id, ty);
         ck.map.set_bir(id, scope.id);
-    });
-    id
+        Ok(id)
+    })
 }
 
-fn check_item<'bir>(ck: &mut Checker<'bir>, item: &'bir bir::Item) -> ID {
+fn check_item<'bir>(
+    ck: &mut Checker<'bir>,
+    item: &'bir bir::Item,
+) -> Result<ID, ID> {
     match &item.kind {
         bir::ItemKind::Let(id) => check_let(ck, ck.bir.let_(id)),
         bir::ItemKind::Expr(id) => check_expr(ck, ck.bir.expr(id)),
     }
 }
 
-fn check_let<'bir>(ck: &mut Checker<'bir>, let_: &'bir bir::Let) -> ID {
+fn check_let<'bir>(
+    ck: &mut Checker<'bir>,
+    let_: &'bir bir::Let,
+) -> Result<ID, ID> {
     let tyref = match let_.ty(ck.bir) {
         Some(ty) => check_typeref(ck, ty),
         None => ck.new_marker_ty(),
     };
     let mut ty = ck.ty_id(tyref);
     if let Some(expr) = let_.expr(ck.bir) {
-        let expr = check_expr(ck, expr);
+        let expr = check_expr(ck, expr)?;
         match ck.unify(tyref, expr) {
             Some(t) => ty = t,
             None => ck.set_err(expr, ErrorKind::Unification, &[expr, tyref]),
         }
     }
-    ck.add_var(let_.id, &let_.name, ty)
+    Ok(ck.add_var(let_.id, &let_.ident, ty))
 }
 
-fn check_expr<'bir>(ck: &mut Checker<'bir>, expr: &'bir bir::Expr) -> ID {
+fn check_expr<'bir>(
+    ck: &mut Checker<'bir>,
+    expr: &'bir bir::Expr,
+) -> Result<ID, ID> {
     let expr_id = ck.current_ns().new_node(Kind::Expr);
     let ty = match &expr.kind {
-        bir::ExprKind::NameRef { name } => {
-            if let Some(name) = ck.lookup_ref(&name) {
-                let id = name.id;
-                ck.map.set_bir_to_id(expr.id, id);
-                return id;
+        bir::ExprKind::NameRef { id } => {
+            if let Some(name) = ck.lookup_ref(id) {
+                ck.map.associate_bir_with_id(expr.id, name);
+                return Ok(name);
             } else {
-                ck.err(ErrorKind::UnknownName, expr.id)
+                return Err(ck.err(ErrorKind::UnknownName, expr.id));
             }
         }
         bir::ExprKind::Literal(lit) => {
@@ -586,24 +605,30 @@ fn check_expr<'bir>(ck: &mut Checker<'bir>, expr: &'bir bir::Expr) -> ID {
                     let ty = ck.string_type();
                     (ck.map.new_constant(ty, Constant::Str(s.clone())), ty)
                 }
+                bir::Literal::Struct(s) => {
+                    let ty = ck.lookup_ref(&s.name).ok_or_else(|| {
+                        ck.err(ErrorKind::UnknownName, expr.id)
+                    })?;
+                    (ck.map.new_constant(ty, todo!()), ty)
+                }
             };
             ck.map.set_expr_constant(expr_id, id);
             ty
         }
         bir::ExprKind::Call { receiver, operands } => {
-            check_call_expr(ck, receiver, operands)
+            check_call_expr(ck, receiver, operands)?
         }
         bir::ExprKind::Index { receiver, index } => {
-            check_index_expr(ck, receiver, index)
+            check_index_expr(ck, receiver, index)?
         }
-        bir::ExprKind::Op(op) => check_op_expr(ck, op),
+        bir::ExprKind::Op(op) => check_op_expr(ck, op)?,
         bir::ExprKind::Block { scope } => {
-            let scope = check_block(ck, ck.bir.block(scope));
+            let scope = check_block(ck, ck.bir.block(scope))?;
             ck.ty_id(scope)
         }
         bir::ExprKind::Return { expr } => {
             let id = if let Some(expr) = expr {
-                check_expr(ck, ck.bir.expr(expr))
+                check_expr(ck, ck.bir.expr(expr))?
             } else {
                 ck.void_type()
             };
@@ -625,16 +650,16 @@ fn check_expr<'bir>(ck: &mut Checker<'bir>, expr: &'bir bir::Expr) -> ID {
             left,
             right,
         } => {
-            let cond = check_expr(ck, ck.bir.expr(condition));
+            let cond = check_expr(ck, ck.bir.expr(condition))?;
             if ck.unify(ck.bool_type(), cond).is_none() {
                 ck.set_err(cond, ErrorKind::Unification, &[cond, cond]);
             }
-            let left_scope = check_block(ck, ck.bir.block(left));
+            let left_scope = check_block(ck, ck.bir.block(left))?;
             match kind {
                 bir::BranchKind::If => ck.void_type(),
                 bir::BranchKind::IfElse => {
                     let right_scope =
-                        check_block(ck, ck.bir.block(&right.unwrap()));
+                        check_block(ck, ck.bir.block(&right.unwrap()))?;
                     match ck.unify(left_scope, right_scope) {
                         Some(ty) => ty,
                         None => {
@@ -650,14 +675,14 @@ fn check_expr<'bir>(ck: &mut Checker<'bir>, expr: &'bir bir::Expr) -> ID {
             }
         }
         bir::ExprKind::Loop { body, kind } => {
-            check_block(ck, ck.bir.block(body));
+            check_block(ck, ck.bir.block(body))?;
             match kind {
                 bir::LoopKind::Loop => ck.never_type(),
                 bir::LoopKind::While => ck.void_type(),
             }
         }
         bir::ExprKind::Cast { val, to } => {
-            let expr = check_expr(ck, ck.bir.expr(val));
+            let expr = check_expr(ck, ck.bir.expr(val))?;
             let tyref = check_typeref(ck, ck.bir.typeref(to));
             if ck.map.ty(expr).unwrap().is_marker() {
                 ck.unify(tyref, expr);
@@ -667,16 +692,16 @@ fn check_expr<'bir>(ck: &mut Checker<'bir>, expr: &'bir bir::Expr) -> ID {
     };
     ck.map.set_ty(expr_id, ty);
     ck.map.set_bir(expr_id, expr.id);
-    expr_id
+    Ok(expr_id)
 }
 
 fn check_index_expr(
     ck: &mut Checker,
     receiver: &bir::ID,
     index: &bir::ID,
-) -> ID {
-    let receiver_id = check_expr(ck, ck.bir.expr(receiver));
-    let expr_id = check_expr(ck, ck.bir.expr(index));
+) -> Result<ID, ID> {
+    let receiver_id = check_expr(ck, ck.bir.expr(receiver))?;
+    let expr_id = check_expr(ck, ck.bir.expr(index))?;
     if ck.unify(ck.index_type(), expr_id).is_none() {
         ck.set_err(
             expr_id,
@@ -686,111 +711,89 @@ fn check_index_expr(
     }
     let receiver_ty = ck.map.ty(receiver_id).unwrap();
     if receiver_ty.is_ptr() {
-        receiver_ty.pointee()
+        Ok(receiver_ty.pointee())
     } else {
-        ck.err(ErrorKind::InvalidPointeeType, *receiver)
+        Err(ck.err(ErrorKind::InvalidPointeeType, *receiver))
     }
 }
 
-fn resolve_name(
+fn lookup_or_err(
     ck: &mut Checker,
-    ns: Option<ID>,
-    expr: &bir::Expr,
+    name: &bir::ID,
+    bir: &bir::ID,
 ) -> Result<ID, ID> {
-    match &expr.kind {
-        bir::ExprKind::NameRef { name } => {
-            let ns = ns.unwrap_or(ck.current_ns().id);
-            match ck.lookup_in(ns, name) {
-                Some(name) => Ok(name.id),
-                None => Err(ck.err(ErrorKind::UnknownName, expr.id)),
-            }
-        }
-        bir::ExprKind::Op(op) => match (op.fixity, op.kind) {
-            (bir::OpFixity::Infix, bir::OpKind::ScopeAccess) => {
-                let lhs = check_expr(ck, ck.bir.expr(&op.operands[0]));
-                let rhs = ck.bir.expr(&op.operands[1]);
-
-                debug_assert_eq!(
-                    ck.map.ns(lhs).unwrap().kind(&ck.map),
-                    Kind::Module
-                );
-
-                resolve_name(ck, Some(lhs), rhs)
-            }
-            _ => unreachable!(),
-        },
-        _ => unreachable!(),
-    }
+    let ns = ck.current_ns().id;
+    ck.lookup_in(ns, name)
+        .ok_or_else(|| ck.err(ErrorKind::UnknownName, *bir))
 }
 
 fn check_call_expr(
     ck: &mut Checker,
     receiver: &bir::ID,
     operands: &Vec<bir::ID>,
-) -> ID {
-    let called_fn = ck.bir.expr(receiver);
-    let fn_id = match resolve_name(ck, None, called_fn) {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-    ck.map.set_bir_to_id(*receiver, fn_id);
+) -> Result<ID, ID> {
+    let called_fn = ck
+        .bir
+        .expr(receiver)
+        .name(ck.bir)
+        .ok_or_else(|| ck.err(ErrorKind::InvalidCallReceiver, *receiver))?;
+    let fn_id = lookup_or_err(ck, &called_fn.id, receiver)?;
+    ck.map.associate_bir_with_id(*receiver, fn_id);
 
-    let fn_ty = match ck.map.ty(fn_id).unwrap().into_fn_ty() {
-        Some(ty) => ty,
-        None => return ck.err(ErrorKind::CallToNonFnType, *receiver),
-    };
-    let args: Vec<_> = operands
+    let fn_ty = ck
+        .map
+        .ty(fn_id)
+        .unwrap()
+        .into_fn_ty()
+        .ok_or_else(|| ck.err(ErrorKind::CallToNonFnType, *receiver))?;
+    let args = operands
         .iter()
         .map(|id| check_expr(ck, ck.bir.expr(id)))
-        .collect();
-    let mut call_sig_mismatch = false;
-    if fn_ty.parameters.len() != args.len()
-        && (!fn_ty.is_var_args
-            || (fn_ty.is_var_args && args.len() < fn_ty.parameters.len()))
-    {
-        // Call sig length mismatch, just ignore params -- they won't apply anyways.
-        call_sig_mismatch = true;
-    } else {
+        .collect::<Result<Vec<_>, ID>>()?;
+    let mut call_sig_match = args.len() == fn_ty.parameters.len()
+        || fn_ty.is_var_args && args.len() > fn_ty.parameters.len();
+    if call_sig_match {
         // Call sig length matches at least -- now check if the params match as well.
         for (idx, param_ty) in fn_ty.parameters.iter().enumerate() {
             let arg = args[idx];
             if ck.unify(*param_ty, arg).is_none() {
                 ck.set_err(arg, ErrorKind::Unification, &[arg, *param_ty]);
-                call_sig_mismatch = true;
+                call_sig_match = false;
             }
         }
     }
-    if call_sig_mismatch {
-        ck.err(ErrorKind::UnknownCall, *receiver);
+    if !call_sig_match {
+        return Err(ck.err(ErrorKind::UnknownCall, *receiver));
     }
-    fn_ty.return_ty
+    ck.map.add_caller(ck.current_fn().id, fn_id);
+    Ok(fn_ty.return_ty)
 }
 
-fn check_op_expr(ck: &mut Checker, op: &bir::Op) -> ID {
+fn check_op_expr(ck: &mut Checker, op: &bir::Op) -> Result<ID, ID> {
     match (op.fixity, op.kind) {
         (bir::OpFixity::Infix, kind) => match kind {
             bir::OpKind::Plus
             | bir::OpKind::Minus
             | bir::OpKind::Multiply
             | bir::OpKind::Divide => {
-                let lhs = check_expr(ck, ck.bir.expr(&op.operands[0]));
-                let rhs = check_expr(ck, ck.bir.expr(&op.operands[1]));
-                ck.unify(lhs, rhs).unwrap_or_else(|| {
+                let lhs = check_expr(ck, ck.bir.expr(&op.operands[0]))?;
+                let rhs = check_expr(ck, ck.bir.expr(&op.operands[1]))?;
+                Ok(ck.unify(lhs, rhs).unwrap_or_else(|| {
                     // TODO this should be set on the expr itself
                     ck.set_err(lhs, ErrorKind::Unification, &[lhs, rhs]);
                     ck.ty_id(lhs)
-                })
+                }))
             }
-            bir::OpKind::FieldAccess => {
-                check_field_access(ck, &op.operands[0], &op.operands[1])
-            }
+            // Need to add checks
+            bir::OpKind::FieldAccess => check_field_access(ck, op),
             bir::OpKind::LessThan
             | bir::OpKind::LessThanEquals
             | bir::OpKind::GreaterThan
             | bir::OpKind::GreaterThanEquals
-            | bir::OpKind::Equals => {
-                let lhs = check_expr(ck, ck.bir.expr(&op.operands[0]));
-                let rhs = check_expr(ck, ck.bir.expr(&op.operands[1]));
+            | bir::OpKind::Equals
+            | bir::OpKind::NotEquals => {
+                let lhs = check_expr(ck, ck.bir.expr(&op.operands[0]))?;
+                let rhs = check_expr(ck, ck.bir.expr(&op.operands[1]))?;
                 match ck.unify(lhs, rhs) {
                     Some(ty) if ck.map.ty(ty).unwrap().is_marker() => {
                         ck.set_err(lhs, ErrorKind::Unification, &[lhs, rhs]);
@@ -801,40 +804,39 @@ fn check_op_expr(ck: &mut Checker, op: &bir::Op) -> ID {
                     }
                     _ => {}
                 }
-                ck.bool_type()
+                Ok(ck.bool_type())
             }
             bir::OpKind::Assignment => {
-                let dst = check_expr(ck, ck.bir.expr(&op.operands[0]));
+                let dst = check_expr(ck, ck.bir.expr(&op.operands[0]))?;
                 if ck.map.param(dst).is_some() {
                     ck.set_err(dst, ErrorKind::ParamAssignment, &[dst]);
                 }
-                let src = check_expr(ck, ck.bir.expr(&op.operands[1]));
+                let src = check_expr(ck, ck.bir.expr(&op.operands[1]))?;
                 if ck.unify(dst, src).is_none() {
                     // TODO this should be set on the expr itself
                     ck.set_err(dst, ErrorKind::Unification, &[dst, src]);
                 }
-                ck.void_type()
+                Ok(ck.void_type())
             }
-            bir::OpKind::ScopeAccess => todo!(),
         },
         (bir::OpFixity::Postfix, _) => todo!(),
         (bir::OpFixity::Prefix, _) => todo!(),
     }
 }
 
-fn check_field_access(
-    ck: &mut Checker,
-    receiver: &bir::ID,
-    field: &bir::ID,
-) -> ID {
-    let receiver = check_expr(ck, ck.bir.expr(receiver));
-    let receiver_ty = ck.ty_id(receiver);
-    let field_name = ck.bir.expr(field).name();
-    let id = match field_name.and_then(|ident| ck.lookup_in(receiver_ty, ident))
-    {
-        Some(name) => name.id,
-        None => todo!(),
+fn check_field_access(ck: &mut Checker, op: &bir::Op) -> Result<ID, ID> {
+    let receiver = check_expr(ck, ck.bir.expr(&op.operands[0]))?;
+    let receiver_ty = match ck.map.ty(receiver) {
+        Some(ty) if ty.is_aggregate() => ty.id,
+        Some(ty) if ty.is_ptr() => ty.pointee(),
+        _ => {
+            return Err(ck.err(ErrorKind::InvalidFieldReceiver, op.operands[0]));
+        }
     };
-    ck.map.set_bir_to_id(*field, id);
-    ck.ty_id(id)
+    ck.in_ns(receiver_ty, |ck| {
+        ck.check_namespace_parents = false;
+        let result = check_expr(ck, ck.bir.expr(&op.operands[1]))?;
+        ck.check_namespace_parents = true;
+        Ok(ck.ty_id(result))
+    })
 }

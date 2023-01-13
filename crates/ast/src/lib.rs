@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
-use cst::green::SyntaxKind::{self, *};
 use cst::syntax;
 use cst::T;
+
+pub use cst::green::SyntaxKind;
+use cst::green::SyntaxKind::*;
 
 pub trait Node {
     fn cast(node: syntax::Node) -> Option<Arc<Self>>
@@ -299,7 +301,11 @@ mod grammar {
             impl $Token {
                 #[inline]
                 pub fn to_string_indented(&self, indent: usize) -> String {
-                    format!("{}{}: {}", str::repeat(" ", indent), stringify!($Token), self.syntax().text())
+                    format!("{}{}: {}",
+                        str::repeat(" ", indent),
+                        stringify!($Token),
+                        self.syntax().text()
+                    )
                 }
             }
             impl std::fmt::Display for $Token {
@@ -318,12 +324,34 @@ mod grammar {
         (r_curly : Token    <RightCurly>)
     });
 
+    impl Module {
+        pub fn inner_mods(&self) -> impl Iterator<Item = Arc<Module>> + '_ {
+            self.items().filter_map(|i| i.mod_())
+        }
+        pub fn imports(&self) -> impl Iterator<Item = Arc<Import>> + '_ {
+            self.items().filter_map(|i| i.import())
+        }
+        pub fn types(&self) -> impl Iterator<Item = Arc<TypeItem>> + '_ {
+            self.items().filter_map(|i| i.type_())
+        }
+        pub fn fns(&self) -> impl Iterator<Item = Arc<FnDef>> + '_ {
+            self.items().filter_map(|i| i.fn_())
+        }
+    }
+
     decl_node_enum!(enum Item {
         Module(mod_),
+        Import(import),
         FnDef(fn_),
         Let(let_),
         ExprItem(expr_item),
         TypeItem(type_),
+    });
+
+    decl_node!(struct Import: IMPORT_ITEM {
+        (import_kw : Token<ImportKw >)
+        (ident     : Token<Ident    >)
+        (semi      : Token<SemiColon>)
     });
 
     decl_node!(struct Let: LET_ITEM {
@@ -340,7 +368,8 @@ mod grammar {
         (name       : Node <Name>     )
         (param_list : Node <ParamList>)
         (arrow      : Token<DashArrow>)
-        (type_      : Node <Type>     )
+        (return_ty  : Node <Type>     )
+        (extern_    : Token<ExternKw> )
         (block      : Node <Block>    )
         (semicolon  : Token<SemiColon>)
     });
@@ -382,16 +411,27 @@ mod grammar {
         (ellipsis: Token<Ellipsis>)
     });
 
-    decl_node!(struct Name: NAME {
+    decl_node_enum!(enum Name {
+        BasicName(basic_name),
+        DottedName(dotted_name),
+    });
+    decl_node!(struct BasicName: NAME {
         (ident: Token<Ident>)
     });
+    decl_node!(struct DottedName: DOTTED_NAME {
+        (head       : Token<Ident     >)
+        (coloncolon : Token<ColonColon>)
+        (tail       : Node <Name      >)
+    });
+
+
     decl_node_enum!(enum Type {
         BasicType(basic_type),
         PointerType(pointer_type),
     });
 
     decl_node!(struct BasicType: BASIC_TYPE {
-        (ident: Token<Ident>)
+        (name: Node<Name>)
     });
     decl_node!(struct PointerType: POINTER_TYPE {
         (pointee: Node<Type>)
@@ -399,6 +439,7 @@ mod grammar {
 
     decl_node_enum!(enum Expr {
         Literal(literal),
+        StructLiteral(struct_literal),
         NameRef(name_ref),
         PrefixExpr(prefix_op),
         BinExpr(bin_op),
@@ -424,8 +465,14 @@ mod grammar {
         Str(string),
     });
 
+    decl_node!(struct StructLiteral: STRUCT_LITERAL {
+        (name       : Node <Name      >)
+        (left_curly : Token<LeftCurly >)
+        (right_curly: Token<RightCurly>)
+    });
+
     decl_node!(struct NameRef: NAME_REF {
-        (name: Token<Ident>)
+        (name: Node<Name>)
     });
     decl_node!(struct PrefixExpr: PREFIX_EXPR {
         (op      : Token<PrefixOp>)
@@ -498,10 +545,12 @@ mod grammar {
         Plus(plus),
         Minus(minus),
         Star(star),
+        Slash(slash),
         Dot(dot),
         Gt(gt),
         Lt(lt),
         Eq(eq),
+        Ne(ne),
         Lte(lte),
         Gte(gte),
         And(and),
@@ -517,6 +566,7 @@ mod grammar {
     decl_token!(struct Gt         : T![>]);
     decl_token!(struct Lt         : T![<]);
     decl_token!(struct Eq         : T![==]);
+    decl_token!(struct Ne         : T![!=]);
     decl_token!(struct Lte        : T![>=]);
     decl_token!(struct Gte        : T![<=]);
     decl_token!(struct And        : T![&&]);
@@ -537,6 +587,7 @@ mod grammar {
     decl_token!(struct Colon      : T![:]);
     decl_token!(struct Equals     : T![=]);
     decl_token!(struct ModKw      : T![mod]);
+    decl_token!(struct ImportKw   : T![import]);
     decl_token!(struct TypeKw     : T![type]);
     decl_token!(struct FnKw       : T![fn]);
     decl_token!(struct LetKw      : T![let]);
@@ -544,6 +595,7 @@ mod grammar {
     decl_token!(struct BreakKw    : T![break]);
     decl_token!(struct ContinueKw : T![continue]);
     decl_token!(struct AsKw       : T![as]);
+    decl_token!(struct ExternKw   : T![extern]);
     decl_token!(struct IfKw       : T![if]);
     decl_token!(struct ElseKw     : T![else]);
     decl_token!(struct LoopKw     : T![loop]);
@@ -557,11 +609,11 @@ mod tests {
     use expect_test::{expect, Expect};
 
     use super::*;
-    use cst::parser::{grammar::EntryPoint, Output};
+    use parser::{grammar::EntryPoint, Output};
 
     fn parse_with_entry(s: &str, entry: EntryPoint) -> syntax::Node {
         let Output { root, errors } =
-            cst::parser::parse_str_from_entry(s.trim(), entry);
+            parser::parse_str_from_entry(s.trim(), entry);
         eprintln!("{}", root);
         eprintln!("{:?}", errors);
         assert_eq!(errors.len(), 0);
@@ -594,30 +646,36 @@ fn bar() {}
        "#,
             expect![[r#"
                 Module:
+                  ModKw: None
+                  Ident: None
+                  LeftCurly: None
                   Let:
                     LetKw: let
-                    Name:
+                    BasicName:
                       Ident: foo
                     Colon: :
                     BasicType:
-                      Ident: char
+                      BasicName:
+                        Ident: char
                     Equals: None
                     Expr: None
                     SemiColon: ;
                   FnDef:
                     FnKw: fn
-                    Name:
+                    BasicName:
                       Ident: bar
                     ParamList:
                       LeftParen: (
                       RightParen: )
                     DashArrow: None
                     Type: None
+                    ExternKw: None
                     Block:
                       LeftCurly: {
                       Expr: None
                       RightCurly: }
-                    SemiColon: None"#]],
+                    SemiColon: None
+                  RightCurly: None"#]],
         );
     }
 
@@ -627,16 +685,21 @@ fn bar() {}
             "let foo: int;",
             expect![[r#"
                 Module:
+                  ModKw: None
+                  Ident: None
+                  LeftCurly: None
                   Let:
                     LetKw: let
-                    Name:
+                    BasicName:
                       Ident: foo
                     Colon: :
                     BasicType:
-                      Ident: int
+                      BasicName:
+                        Ident: int
                     Equals: None
                     Expr: None
-                    SemiColon: ;"#]],
+                    SemiColon: ;
+                  RightCurly: None"#]],
         );
     }
 
@@ -646,17 +709,22 @@ fn bar() {}
             "let foo: int = 10;",
             expect![[r#"
                 Module:
+                  ModKw: None
+                  Ident: None
+                  LeftCurly: None
                   Let:
                     LetKw: let
-                    Name:
+                    BasicName:
                       Ident: foo
                     Colon: :
                     BasicType:
-                      Ident: int
+                      BasicName:
+                        Ident: int
                     Equals: =
                     Literal:
                       Number: 10
-                    SemiColon: ;"#]],
+                    SemiColon: ;
+                  RightCurly: None"#]],
         );
     }
 
@@ -678,7 +746,8 @@ fn bar() {}
                       IfKw: if
                       BinExpr:
                         NameRef:
-                          Ident: n
+                          BasicName:
+                            Ident: n
                         Gte: <=
                         Literal:
                           Number: 1
@@ -687,28 +756,32 @@ fn bar() {}
                         Return:
                           ReturnKw: return
                           NameRef:
-                            Ident: n
+                            BasicName:
+                              Ident: n
                         RightCurly: }
                       ElseKw: None
                       Block: None
                     SemiColon: None
                   Let:
                     LetKw: let
-                    Name:
+                    BasicName:
                       Ident: j
                     Colon: :
                     BasicType:
-                      Ident: i32
+                      BasicName:
+                        Ident: i32
                     Equals: =
                     BinExpr:
                       NameRef:
-                        Ident: n
+                        BasicName:
+                          Ident: n
                       Minus: -
                       Literal:
                         Number: 2
                     SemiColon: ;
                   NameRef:
-                    Ident: n
+                    BasicName:
+                      Ident: n
                   RightCurly: }"#]],
         )
     }
@@ -718,18 +791,23 @@ fn bar() {}
         check_module(
             "fn foo();",
             expect![[r#"
-            Module:
-              FnDef:
-                FnKw: fn
-                Name:
-                  Ident: foo
-                ParamList:
-                  LeftParen: (
-                  RightParen: )
-                DashArrow: None
-                Type: None
-                Block: None
-                SemiColon: ;"#]],
+                Module:
+                  ModKw: None
+                  Ident: None
+                  LeftCurly: None
+                  FnDef:
+                    FnKw: fn
+                    BasicName:
+                      Ident: foo
+                    ParamList:
+                      LeftParen: (
+                      RightParen: )
+                    DashArrow: None
+                    Type: None
+                    ExternKw: None
+                    Block: None
+                    SemiColon: ;
+                  RightCurly: None"#]],
         );
     }
 
@@ -739,20 +817,25 @@ fn bar() {}
             "fn foo() {}",
             expect![[r#"
                 Module:
+                  ModKw: None
+                  Ident: None
+                  LeftCurly: None
                   FnDef:
                     FnKw: fn
-                    Name:
+                    BasicName:
                       Ident: foo
                     ParamList:
                       LeftParen: (
                       RightParen: )
                     DashArrow: None
                     Type: None
+                    ExternKw: None
                     Block:
                       LeftCurly: {
                       Expr: None
                       RightCurly: }
-                    SemiColon: None"#]],
+                    SemiColon: None
+                  RightCurly: None"#]],
         );
     }
 
@@ -762,18 +845,24 @@ fn bar() {}
             "fn foo() -> int;",
             expect![[r#"
                 Module:
+                  ModKw: None
+                  Ident: None
+                  LeftCurly: None
                   FnDef:
                     FnKw: fn
-                    Name:
+                    BasicName:
                       Ident: foo
                     ParamList:
                       LeftParen: (
                       RightParen: )
                     DashArrow: ->
                     BasicType:
-                      Ident: int
+                      BasicName:
+                        Ident: int
+                    ExternKw: None
                     Block: None
-                    SemiColon: ;"#]],
+                    SemiColon: ;
+                  RightCurly: None"#]],
         );
     }
 
@@ -783,21 +872,27 @@ fn bar() {}
             "fn foo() -> int {}",
             expect![[r#"
                 Module:
+                  ModKw: None
+                  Ident: None
+                  LeftCurly: None
                   FnDef:
                     FnKw: fn
-                    Name:
+                    BasicName:
                       Ident: foo
                     ParamList:
                       LeftParen: (
                       RightParen: )
                     DashArrow: ->
                     BasicType:
-                      Ident: int
+                      BasicName:
+                        Ident: int
+                    ExternKw: None
                     Block:
                       LeftCurly: {
                       Expr: None
                       RightCurly: }
-                    SemiColon: None"#]],
+                    SemiColon: None
+                  RightCurly: None"#]],
         );
     }
 
@@ -807,27 +902,34 @@ fn bar() {}
             "fn foo(bar: u32) -> int {}",
             expect![[r#"
                 Module:
+                  ModKw: None
+                  Ident: None
+                  LeftCurly: None
                   FnDef:
                     FnKw: fn
-                    Name:
+                    BasicName:
                       Ident: foo
                     ParamList:
                       LeftParen: (
                       NamedParam:
-                        Name:
+                        BasicName:
                           Ident: bar
                         Colon: :
                         BasicType:
-                          Ident: u32
+                          BasicName:
+                            Ident: u32
                       RightParen: )
                     DashArrow: ->
                     BasicType:
-                      Ident: int
+                      BasicName:
+                        Ident: int
+                    ExternKw: None
                     Block:
                       LeftCurly: {
                       Expr: None
                       RightCurly: }
-                    SemiColon: None"#]],
+                    SemiColon: None
+                  RightCurly: None"#]],
         );
     }
 
@@ -873,11 +975,12 @@ fn bar() {}
         check_expr(
             "foo()",
             expect![[r#"
-            CallExpr:
-              NameRef:
-                Ident: foo
-              LeftParen: (
-              RightParen: )"#]],
+                CallExpr:
+                  NameRef:
+                    BasicName:
+                      Ident: foo
+                  LeftParen: (
+                  RightParen: )"#]],
         );
     }
 
@@ -887,6 +990,9 @@ fn bar() {}
             "10 + 10;",
             expect![[r#"
                 Module:
+                  ModKw: None
+                  Ident: None
+                  LeftCurly: None
                   ExprItem:
                     BinExpr:
                       Literal:
@@ -894,7 +1000,8 @@ fn bar() {}
                       Plus: +
                       Literal:
                         Number: 10
-                    SemiColon: ;"#]],
+                    SemiColon: ;
+                  RightCurly: None"#]],
         );
     }
 }

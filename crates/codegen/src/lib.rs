@@ -16,6 +16,7 @@ struct CG<'ctx> {
     module: llvm::Module<'ctx>,
     builder: llvm::Builder<'ctx>,
     target_machine: llvm::TargetMachine,
+    optimize: bool,
 
     values: HashMap<lir::ValueID, Value<'ctx>>,
 }
@@ -56,12 +57,23 @@ impl<'ctx> CG<'ctx> {
             module,
             builder,
             target_machine,
+            optimize,
             values: Default::default(),
         }
     }
 
     fn compile(&mut self) {
         visit_module(self, &self.lir);
+        if self.optimize {
+            let pass_manager_builder = llvm::PassManagerBuilder::create();
+            pass_manager_builder
+                .set_optimization_level(llvm::OptimizationLevel::Aggressive);
+
+            let mpm = llvm::PassManager::create(&());
+            pass_manager_builder.set_inliner_with_threshold(100);
+            pass_manager_builder.populate_module_pass_manager(&mpm);
+            mpm.run_on(&self.module);
+        }
     }
 
     fn write_ir(&self, output_path: Option<PathBuf>) {
@@ -115,7 +127,13 @@ impl<'ctx> CG<'ctx> {
             .expect("Error writing object file!");
 
         let output = std::process::Command::new("gcc")
-            .args([object_file.to_str().unwrap(), "-o", &output_path])
+            .args([
+                "-no-pie",
+                "-lc",
+                object_file.to_str().unwrap(),
+                "-o",
+                &output_path,
+            ])
             .output()
             .unwrap();
         print_if_nonempty("stdout", output.stdout);
@@ -153,7 +171,16 @@ impl<'ctx> CG<'ctx> {
                     .ptr_type(llvm::AddressSpace::Generic)
                     .into()
             }
-            TyKind::Fn | TyKind::Void => unreachable!("{:?}", ty.kind),
+            TyKind::Fn { .. } | TyKind::Void => unreachable!("{:?}", ty.kind),
+            TyKind::Struct => {
+                let struct_ty = ty.as_struct_ty(self.lir);
+                let member_tys = struct_ty
+                    .members
+                    .iter()
+                    .map(|id| self.translate_type(self.lir.types.get(id)))
+                    .collect::<Vec<_>>();
+                self.context.struct_type(&member_tys, false).into()
+            }
         }
     }
 
@@ -202,7 +229,7 @@ fn visit_module<'ctx>(cg: &mut CG<'ctx>, module: &'ctx lir::Module) {
                 |(idx, param)| {
                     let llvm_param =
                         fn_value.get_nth_param(idx as u32).unwrap();
-                    (param.val.id, Value::Val(llvm_param))
+                    (param.val, Value::Val(llvm_param))
                 },
             ));
             for block in blocks {
@@ -221,18 +248,20 @@ fn visit_function_decl<'ctx>(
     function: &lir::Function,
 ) -> llvm::FunctionValue<'ctx> {
     let ctx = lir::Context::full(c.lir, function);
-    let mut param_types = Vec::new();
-    for param in function.params.iter() {
-        param_types.push(param.val.ty(ctx));
-    }
-    let fn_return_type = function.return_ty(c.lir);
-    let fn_type =
-        c.translate_fn_type(fn_return_type, &param_types, function.is_var_args);
-    let fn_ = c.module.add_function(
-        &function.ident,
-        fn_type,
-        Some(llvm::Linkage::External),
+    let fn_ty = function.ty(ctx).as_fn_ty();
+    let param_types: Vec<_> = fn_ty.params(ctx).collect();
+    let fn_type = c.translate_fn_type(
+        fn_ty.return_ty(ctx),
+        &param_types,
+        fn_ty.is_var_args,
     );
+    let linkage = match function.internal {
+        true => llvm::Linkage::Internal,
+        false => llvm::Linkage::External,
+    };
+    let fn_ = c
+        .module
+        .add_function(&function.ident, fn_type, Some(linkage));
     for (idx, param) in fn_.get_param_iter().enumerate() {
         let name = &function.nth_param(idx).val.ident(ctx);
         param.set_name(name);
@@ -248,18 +277,12 @@ fn populate_basic_blocks<'ctx>(
     c.block_info.clear();
 
     let mut cg_blocks = Vec::new();
-    let mut is_start_block = true;
     function.visit_blocks_in_rpo(|block| {
         let id = block.val(function).id;
 
-        if is_start_block {
-            is_start_block = false;
-            debug_assert_eq!(block.num_predecessors(function), 0);
-        }
-
         let basic_block = c.context.append_basic_block(
             fn_,
-            &format!("{}.{}", function.ident, id.to_string()),
+            &format!("{}.{}", function.ident, cg_blocks.len()),
         );
         let block = Block {
             lir: block,
@@ -283,24 +306,25 @@ fn visit_inst<'ctx>(
             let val = visit_rvalue(c, ctx, &inst.rvals[0]);
             Some(Value::Val(val))
         }
-        InstKind::Offset => {
-            let ptr = visit_rvalue(c, ctx, &inst.rvals[0]).into_pointer_value();
-            let index = visit_rvalue(c, ctx, &inst.rvals[1]).into_int_value();
-            Some(Value::Val(match index.get_zero_extended_constant() {
-                // As an optimization, fold away zero offsets
-                Some(0) => ptr.as_basic_value_enum(),
-                _ => unsafe {
-                    c.builder.build_in_bounds_gep(ptr, &[index], "gep")
-                }
-                .as_basic_value_enum(),
-            }))
-        }
         InstKind::Load => {
             let ptr = visit_lvalue(c, ctx, &inst.rvals[0]).into_pointer_value();
             Some(Value::Val(c.builder.build_load(ptr, "load")))
         }
         InstKind::Store => {
             Some(Value::Val(visit_rvalue(c, ctx, &inst.rvals[0])))
+        }
+        InstKind::Subscript => {
+            let base =
+                visit_rvalue(c, ctx, &inst.rvals[0]).into_pointer_value();
+            let indices: Vec<_> = inst
+                .rvals
+                .iter()
+                .skip(1)
+                .map(|v| visit_rvalue(c, ctx, v).into_int_value())
+                .collect();
+            Some(Value::Addr(unsafe {
+                c.builder.build_in_bounds_gep(base, &indices, "subscr")
+            }))
         }
         InstKind::Add => {
             let lhs = visit_rvalue(c, ctx, &inst.rvals[0]).into_int_value();
@@ -325,7 +349,7 @@ fn visit_inst<'ctx>(
             let rhs = visit_rvalue(c, ctx, &inst.rvals[1]).into_int_value();
             Some(Value::Val(
                 c.builder
-                    .build_int_nsw_mul(lhs, rhs, "sub")
+                    .build_int_nsw_mul(lhs, rhs, "mul")
                     .as_basic_value_enum(),
             ))
         }
@@ -358,11 +382,10 @@ fn visit_inst<'ctx>(
                 .map(|val| to_basic_mdvalue(visit_any_rvalue(c, ctx, val)))
                 .collect();
             let call = c.builder.build_call(called_fn, ops.as_slice(), "call");
-            if called_fn.get_type().get_return_type().is_none() {
-                None
-            } else {
-                Some(Value::Val(call.try_as_basic_value().left().unwrap()))
-            }
+            called_fn
+                .get_type()
+                .get_return_type()
+                .map(|_| Value::Val(call.try_as_basic_value().left().unwrap()))
         }
         InstKind::Var => {
             let ty = c.translate_type(inst.lval().ty(ctx));
@@ -373,6 +396,7 @@ fn visit_inst<'ctx>(
             use lir::CmpKind;
             let predicate = match kind {
                 CmpKind::Eq => inkwell::IntPredicate::EQ,
+                CmpKind::Ne => inkwell::IntPredicate::NE,
                 CmpKind::Gt => inkwell::IntPredicate::SGT,
                 CmpKind::Lt => inkwell::IntPredicate::SLT,
                 CmpKind::Gte => inkwell::IntPredicate::SGE,
@@ -405,18 +429,19 @@ fn visit_inst<'ctx>(
             c.builder.build_conditional_branch(cond, then, alt);
             None
         }
-        InstKind::Subscript => {
+        InstKind::GetField => {
             let base =
                 visit_rvalue(c, ctx, &inst.rvals[0]).into_pointer_value();
-            let indices: Vec<_> = inst
-                .rvals
-                .iter()
-                .skip(1)
-                .map(|v| visit_rvalue(c, ctx, v).into_int_value())
-                .collect();
-            Some(Value::Addr(unsafe {
-                c.builder.build_in_bounds_gep(base, &indices, "subscr")
-            }))
+            let index = visit_rvalue(c, ctx, &inst.rvals[1])
+                .into_int_value()
+                .get_zero_extended_constant()
+                .unwrap();
+            Some(Value::Val(
+                c.builder
+                    .build_struct_gep(base, index as u32, "index")
+                    .unwrap()
+                    .as_basic_value_enum(),
+            ))
         }
         InstKind::Nop => None,
     };
@@ -432,7 +457,10 @@ fn visit_inst<'ctx>(
             }
         }
     } else {
-        debug_assert_eq!(result, None);
+        if result.is_some() {
+            c.module.print_to_stderr();
+            debug_assert_eq!(result, None);
+        }
     }
 }
 
@@ -497,8 +525,23 @@ fn visit_any_value<'ctx>(
             let ident = &ctx.as_mod().fn_(&value.id).ident;
             c.module.get_function(ident).unwrap().into()
         }
+        lir::ValueKind::Undef => {
+            let ty = c.translate_type(value.ty(ctx));
+            get_undef(ty).into()
+        }
         lir::ValueKind::Void => unreachable!("can't have a value of void!"),
         lir::ValueKind::Block => unreachable!("can't have a value of a block!"),
+    }
+}
+
+fn get_undef(v: llvm::BasicTypeEnum) -> llvm::BasicValueEnum {
+    match v {
+        inkwell::types::BasicTypeEnum::ArrayType(a) => a.get_undef().into(),
+        inkwell::types::BasicTypeEnum::FloatType(f) => f.get_undef().into(),
+        inkwell::types::BasicTypeEnum::IntType(i) => i.get_undef().into(),
+        inkwell::types::BasicTypeEnum::PointerType(p) => p.get_undef().into(),
+        inkwell::types::BasicTypeEnum::StructType(s) => s.get_undef().into(),
+        inkwell::types::BasicTypeEnum::VectorType(v) => v.get_undef().into(),
     }
 }
 

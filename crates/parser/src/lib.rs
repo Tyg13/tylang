@@ -1,18 +1,18 @@
 use std::collections::HashSet;
 
-use crate::green::SyntaxKind::{self, *};
-use crate::syntax;
-use crate::utils::Position;
+use cst::green::SyntaxKind::{self, *};
+use cst::syntax;
+use utils::Position;
 
 pub mod grammar;
 pub mod input;
 pub mod output;
 
-mod parser;
+mod types;
 
 pub use input::Input;
 pub use output::Output;
-pub use parser::*;
+pub use types::*;
 
 pub trait TokenSource {
     fn kind_at(&self, index: usize) -> SyntaxKind;
@@ -38,6 +38,13 @@ pub fn parse_str_from_entry(s: &str, entry: grammar::EntryPoint) -> Output {
     output::parse(Input::lex(s.as_ref()), entry)
 }
 
+#[derive(Debug)]
+pub struct Error {
+    pub msg: String,
+    pub pos: Position,
+    pub len: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,13 +64,5 @@ mod tests {
 
     pub fn check_tree(input: &str, expected: expect_test::Expect) {
         check_from_entry(input.trim(), expected, grammar::EntryPoint::Module);
-    }
-
-    pub fn check_expr(input: &str, expected: expect_test::Expect) {
-        check_from_entry(
-            input.trim(),
-            expected,
-            grammar::EntryPoint::Expression,
-        );
     }
 }

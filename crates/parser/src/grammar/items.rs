@@ -1,5 +1,5 @@
-use crate::parser::grammar::*;
-use crate::T;
+use crate::grammar::*;
+use cst::T;
 
 pub(super) fn let_item(parser: &mut Parser<'_>) {
     parser.node(LET_ITEM, |parser| {
@@ -23,20 +23,21 @@ pub(super) fn let_item(parser: &mut Parser<'_>) {
 
 pub(super) fn fn_item(parser: &mut Parser<'_>) {
     parser.node(FN_ITEM, |parser| {
-        parser.with_follow_set(&[T!['('], T!['{'], T![-], T![;]], |parser| {
-            parser.expect_token(T![fn]);
+        parser.expect_token(T![fn]);
+        parser.with_follow_set(&[T!['(']], |parser| {
             name(parser);
-            param_list(parser);
-            if parser.maybe(T![->]) {
-                parser.expect_token(T![->]);
-                type_(parser);
-            }
-            if parser.maybe(T!['{']) {
-                expressions::block(parser);
-            } else {
-                parser.expect_token(T![;]);
-            }
         });
+        param_list(parser);
+        if parser.maybe(T![->]) {
+            parser.expect_token(T![->]);
+            type_(parser);
+        }
+        if parser.maybe(T!['{']) {
+            expressions::block(parser);
+            return;
+        }
+        parser.maybe_token(T![extern]);
+        parser.expect_token(T![;]);
     });
 }
 
@@ -44,9 +45,8 @@ pub(super) fn expr_item(parser: &mut Parser<'_>) {
     parser.node(EXPR_ITEM, |parser| {
         parser.with_follow_set(&[T![;]], |parser| {
             let expr = expressions::expr(parser);
-            let expect_semi = expr
-                .map(|e| e.kind().terminated_by_semicolon())
-                .unwrap_or(true);
+            let expect_semi =
+                expr.map_or(true, |e| e.kind().terminated_by_semicolon());
             if expect_semi {
                 parser.expect_token(T![;]);
             }
@@ -96,9 +96,17 @@ fn type_member(parser: &mut Parser) {
     });
 }
 
+pub(super) fn import_item(parser: &mut Parser) {
+    parser.node(IMPORT_ITEM, |parser| {
+        parser.expect_token(T![import]);
+        expressions::name_ref(parser);
+        parser.expect_token(T![;]);
+    });
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::parser::tests::check_tree;
+    use crate::tests::check_tree;
 
     #[test]
     fn let_no_expr() {
@@ -115,7 +123,8 @@ mod tests {
                     COLON @ 8..9: ':' 
                     WHITESPACE @ 9..10: ' ' 
                     BASIC_TYPE @ 10..13:
-                      IDENT @ 10..13: 'bar' 
+                      NAME @ 10..13:
+                        IDENT @ 10..13: 'bar' 
                     SEMICOLON @ 13..14: ';' "#]],
         );
     }
@@ -135,7 +144,8 @@ mod tests {
                     COLON @ 8..9: ':' 
                     WHITESPACE @ 9..10: ' ' 
                     BASIC_TYPE @ 10..13:
-                      IDENT @ 10..13: 'bar' 
+                      NAME @ 10..13:
+                        IDENT @ 10..13: 'bar' 
                     WHITESPACE @ 13..14: ' ' 
                     EQUALS @ 14..15: '=' 
                     WHITESPACE @ 15..16: ' ' 
@@ -163,7 +173,8 @@ mod tests {
                       COLON @ 14..15: ':' 
                       WHITESPACE @ 15..16: ' ' 
                       BASIC_TYPE @ 16..19:
-                        IDENT @ 16..19: 'i32' 
+                        NAME @ 16..19:
+                          IDENT @ 16..19: 'i32' 
                     COMMA @ 19..20: ',' 
                     WHITESPACE @ 20..21: ' ' 
                     TYPE_MEMBER @ 21..32:
@@ -171,7 +182,8 @@ mod tests {
                       COLON @ 27..28: ':' 
                       WHITESPACE @ 28..29: ' ' 
                       BASIC_TYPE @ 29..32:
-                        IDENT @ 29..32: 'i32' 
+                        NAME @ 29..32:
+                          IDENT @ 29..32: 'i32' 
                     WHITESPACE @ 32..33: ' ' 
                     RIGHT_CURLY @ 33..34: '}' "#]],
         );

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use utils::vec_graph::traversal;
 
 use crate::types::{
     Block, BlockData, BlockGraph, Inst, InstKind, Ty, TyContext, TyID, Users,
@@ -11,10 +12,9 @@ pub struct Function {
     pub ty: TyID,
     pub ident: String,
     pub params: Vec<Param>,
-    pub is_var_args: bool,
+    pub internal: bool,
 
-    pub(crate) insts: Vec<Inst>,
-    pub(crate) vals_to_insts: HashMap<ValueID, usize>,
+    pub(crate) insts: HashMap<ValueID, Inst>,
     pub(crate) locals: Values,
 
     pub(crate) blocks: BlockGraph,
@@ -25,21 +25,20 @@ pub struct Function {
 impl Function {
     pub fn new(
         types: &TyContext,
-        ident: &str,
-        param_names: &[String],
+        ident: String,
+        mut param_names: Vec<String>,
+        internal: bool,
         id: ValueID,
         fn_ty: TyID,
-        is_var_args: bool,
     ) -> Self {
         debug_assert!(id.is_global());
         let mut this = Self {
             id,
             ty: fn_ty,
-            ident: ident.to_string(),
+            ident,
             params: Default::default(),
-            is_var_args,
+            internal,
             insts: Default::default(),
-            vals_to_insts: Default::default(),
             locals: Default::default(),
             blocks: Default::default(),
             blocks_by_id: Default::default(),
@@ -54,7 +53,7 @@ impl Function {
                 let val = this.add_val(
                     ValueKind::Param,
                     param.id,
-                    Some(&param_names[idx]),
+                    Some(std::mem::take(&mut param_names[idx])),
                 );
                 Param { val }
             })
@@ -84,8 +83,14 @@ impl Function {
         self.blocks.num_vertices()
     }
 
+    pub fn visit_blocks_in_po(&self, mut f: impl FnMut(Block)) {
+        traversal::post_order(&self.blocks, &mut |node| {
+            f(Block(node));
+        });
+    }
+
     pub fn visit_blocks_in_rpo(&self, mut f: impl FnMut(Block)) {
-        utils::vec_graph::reverse_post_order(&self.blocks, &mut |node| {
+        traversal::reverse_post_order(&self.blocks, &mut |node| {
             f(Block(node));
         });
     }
@@ -111,23 +116,20 @@ impl Function {
         &mut self,
         kind: ValueKind,
         ty: TyID,
-        ident: Option<&str>,
-    ) -> ValueRef {
-        self.locals.add_val(kind, ty, ident, false)
+        ident: Option<String>,
+    ) -> ValueID {
+        self.locals
+            .add_val(kind, ty, ident.map(|i| i.to_string()), false)
     }
 
-    pub fn inst(&self, val: ValueID) -> Option<&Inst> {
+    pub fn inst(&self, val: &ValueID) -> Option<&Inst> {
         debug_assert!(val.is_local());
-        self.vals_to_insts
-            .get(&val)
-            .and_then(|&idx| self.insts.get(idx))
+        self.insts.get(val)
     }
 
     pub(crate) fn inst_mut(&mut self, val: ValueID) -> Option<&mut Inst> {
         debug_assert!(val.is_local());
-        self.vals_to_insts
-            .get(&val)
-            .and_then(|&idx| self.insts.get_mut(idx))
+        self.insts.get_mut(&val)
     }
 
     pub(crate) fn add_inst(
@@ -137,11 +139,10 @@ impl Function {
         block: Block,
         lval: Option<ValueRef>,
         rvals: Vec<ValueRef>,
-        ident: Option<&str>,
+        ident: Option<String>,
     ) -> ValueRef {
-        let inst_val = self
-            .add_val(ValueKind::Inst, ty, ident)
-            .with_parent(block.val(&*self).id);
+        let inst_val = ValueRef::new(self.add_val(ValueKind::Inst, ty, ident))
+            .with_parent(block.val(self).id);
         let lval = if kind.can_have_lvals() {
             lval.map(|v| v.with_parent(inst_val.id))
         } else {
@@ -151,38 +152,53 @@ impl Function {
         let rvals = rvals
             .into_iter()
             .map(|val| {
-                self.add_user(val.id, inst_val.id);
+                self.locals.add_user(val.id, inst_val.id);
                 val.with_parent(inst_val.id)
             })
             .collect();
-        let idx = self.insts.len();
-        self.insts.push(Inst {
-            val: inst_val,
-            kind,
-            lval,
-            rvals,
-        });
-        self.vals_to_insts.insert(inst_val.id, idx);
+        self.insts.insert(
+            inst_val.id,
+            Inst {
+                val: inst_val,
+                kind,
+                lval,
+                rvals,
+            },
+        );
 
         block.add_inst(self, inst_val);
 
         inst_val
     }
 
+    pub(crate) fn remove_inst(&mut self, id: &ValueID) {
+        let (rvals, parent) = {
+            let inst = self.inst(id).unwrap();
+            let rvals = inst.rvals.clone();
+            let parent = inst.block(self);
+            (rvals, parent)
+        };
+        for rval in rvals {
+            self.locals.remove_user(rval.id, *id);
+        }
+        parent.remove_inst(self, id);
+        self.insts.remove(id);
+    }
+
     #[inline]
-    pub(crate) fn block(&self, val: ValueRef) -> Block {
-        debug_assert_eq!(val.kind(self), ValueKind::Block);
-        self.blocks_by_id[&val.id]
+    pub(crate) fn block(&self, id: &ValueID) -> Block {
+        debug_assert_eq!(self.locals.get(id).kind, ValueKind::Block);
+        self.blocks_by_id[&id]
     }
 
     pub(crate) fn add_block<'a>(
         &mut self,
-        label: Option<&str>,
+        label: Option<String>,
         ty: TyID,
     ) -> Block {
-        let val = self
-            .add_val(ValueKind::Block, ty, label)
-            .with_parent(self.id);
+        let val =
+            ValueRef::new(self.add_val(ValueKind::Block, ty, label.clone()))
+                .with_parent(self.id);
         let block = Block(self.blocks.add_vertex(BlockData {
             insts: Vec::new(),
             val,
@@ -194,23 +210,20 @@ impl Function {
         block
     }
 
+    pub(crate) fn remove_blocks(&mut self, vals: &[ValueID]) {
+        let blocks: Vec<_> =
+            vals.iter().map(|v| self.blocks_by_id[v].0).collect();
+        self.blocks.unlink(&blocks);
+        self.blocks_by_id.retain(|k, _| !vals.contains(k));
+    }
+
     #[inline]
     pub(crate) fn add_block_edge(&mut self, from: Block, to: Block) {
         self.blocks.add_edge(from.0, to.0);
-    }
-
-    #[inline]
-    fn add_user(&mut self, val: ValueID, user: ValueID) {
-        self.locals.add_user(val, user)
-    }
-
-    #[inline]
-    pub fn users(&self, val: &ValueID) -> Users<'_> {
-        self.locals.users(val)
     }
 }
 
 #[derive(Debug)]
 pub struct Param {
-    pub val: ValueRef,
+    pub val: ValueID,
 }

@@ -4,44 +4,67 @@
 //
 //  i.e. FnTy(TyID, [TyID]) -> Fold(TyID) + Fold([TyID])
 
+use smallvec::SmallVec;
 use std::collections::HashMap;
 
 #[derive(Debug, Default, Clone, Hash, PartialEq, Eq)]
-pub struct FoldKey(Vec<u8>);
+pub struct FoldKey(SmallVec<[u8; 8]>);
 
 impl FoldKey {
-    pub fn add<T: Foldable>(mut self, val: &T) -> Self {
-        val.fold(&mut self);
+    pub fn add<T: Foldable>(&mut self, val: &T) -> &mut Self {
+        val.fold(self);
+        self
+    }
+
+    pub fn add_all<T: Foldable>(
+        &mut self,
+        vals: impl IntoIterator<Item = T>,
+    ) -> &mut Self {
+        for val in vals {
+            val.fold(self);
+        }
         self
     }
 }
 
 #[derive(Debug)]
-pub struct FoldID<T>(u64, std::marker::PhantomData<T>);
+pub struct FoldID<T: ?Sized>(u64, std::marker::PhantomData<T>);
 
-impl<T> std::hash::Hash for FoldID<T> {
+impl<T: ?Sized> std::fmt::Display for FoldID<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T: ?Sized> Default for FoldID<T> {
+    fn default() -> Self {
+        Self(0, std::marker::PhantomData)
+    }
+}
+
+impl<T: ?Sized> std::hash::Hash for FoldID<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.hash(state)
     }
 }
 
-impl<T> PartialEq for FoldID<T> {
+impl<T: ?Sized> PartialEq for FoldID<T> {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
     }
 }
 
-impl<T> Eq for FoldID<T> {}
+impl<T: ?Sized> Eq for FoldID<T> {}
 
-impl<T> Clone for FoldID<T> {
+impl<T: ?Sized> Clone for FoldID<T> {
     fn clone(&self) -> Self {
         Self(self.0.clone(), self.1.clone())
     }
 }
 
-impl<T> Copy for FoldID<T> {}
+impl<T: ?Sized> Copy for FoldID<T> {}
 
-impl<T> FoldID<T> {
+impl<T: ?Sized> FoldID<T> {
     fn new(v: usize) -> Self {
         Self(v as u64, std::marker::PhantomData)
     }
@@ -79,6 +102,11 @@ impl Foldable for i8 {
         key.0.push(*self as u8);
     }
 }
+impl Foldable for bool {
+    fn fold(&self, key: &mut FoldKey) {
+        key.0.push(*self as u8);
+    }
+}
 
 impl Foldable for &str {
     fn fold(&self, key: &mut FoldKey) {
@@ -86,7 +114,13 @@ impl Foldable for &str {
     }
 }
 
-impl<'a, T: Foldable> Foldable for &'a [T] {
+impl Foldable for String {
+    fn fold(&self, key: &mut FoldKey) {
+        key.0.extend_from_slice(self.as_bytes());
+    }
+}
+
+impl<T: Foldable> Foldable for &'_ [T] {
     fn fold(&self, key: &mut FoldKey) {
         for v in *self {
             v.fold(key);
@@ -94,10 +128,62 @@ impl<'a, T: Foldable> Foldable for &'a [T] {
     }
 }
 
+impl<T: Foldable> Foldable for &'_ T {
+    fn fold(&self, key: &mut FoldKey) {
+        key.add(*self);
+    }
+}
+
+impl<T: Foldable> Foldable for Vec<T> {
+    fn fold(&self, key: &mut FoldKey) {
+        self.as_slice().fold(key)
+    }
+}
+
+impl<T: Foldable> Foldable for (T,) {
+    fn fold(&self, key: &mut FoldKey) {
+        self.0.fold(key);
+    }
+}
+impl<T: Foldable> Foldable for (T, T) {
+    fn fold(&self, key: &mut FoldKey) {
+        self.0.fold(key);
+        self.1.fold(key);
+    }
+}
+impl<T: Foldable> Foldable for (T, T, T) {
+    fn fold(&self, key: &mut FoldKey) {
+        self.0.fold(key);
+        self.1.fold(key);
+        self.2.fold(key);
+    }
+}
+
+impl<T: ?Sized> Foldable for FoldID<T> {
+    fn fold(&self, key: &mut FoldKey) {
+        self.0.fold(key);
+    }
+}
+
+impl Foldable for FoldKey {
+    fn fold(&self, key: &mut FoldKey) {
+        key.0.extend_from_slice(self.0.as_slice());
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FoldingSet<T: Foldable> {
     data: Vec<T>,
     keys_to_ids: HashMap<FoldKey, FoldID<T>>,
+}
+
+impl<'a, T: Foldable> IntoIterator for &'a FoldingSet<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.data.iter()
+    }
 }
 
 impl<T: Foldable> Default for FoldingSet<T> {
@@ -114,15 +200,29 @@ impl<T: Foldable> FoldingSet<T> {
         Default::default()
     }
 
+    pub fn insert(&mut self, key: FoldKey, v: T) -> FoldID<T> {
+        let id = FoldID::new(self.data.len() + 1);
+        self.data.push(v);
+        self.keys_to_ids.insert(key, id);
+        id
+    }
+
+    pub fn insert_and_then<R>(
+        &mut self,
+        key: FoldKey,
+        v: T,
+        f: impl FnOnce(&mut T, FoldID<T>) -> R,
+    ) -> R {
+        let id = self.insert(key, v);
+        f(self.get_mut(&id).unwrap(), id)
+    }
+
     pub fn fold_or_insert(&mut self, v: T) -> FoldID<T> {
         let key = v.fold_key();
         if let Some(id) = self.keys_to_ids.get(&key) {
             return *id;
         }
-        let id = FoldID::new(self.data.len());
-        self.data.push(v);
-        self.keys_to_ids.insert(key, id);
-        id
+        self.insert(key, v)
     }
 
     pub fn try_get_from_key(&self, key: &FoldKey) -> Option<&T> {
@@ -130,11 +230,13 @@ impl<T: Foldable> FoldingSet<T> {
     }
 
     pub fn get(&self, id: &FoldID<T>) -> Option<&T> {
-        self.data.get(id.0 as usize)
+        debug_assert_ne!(id.0, 0);
+        self.data.get(id.0 as usize - 1)
     }
 
     pub fn get_mut(&mut self, id: &FoldID<T>) -> Option<&mut T> {
-        self.data.get_mut(id.0 as usize)
+        debug_assert_ne!(id.0, 0);
+        self.data.get_mut(id.0 as usize - 1)
     }
 }
 
@@ -144,7 +246,7 @@ macro_rules! impl_foldable {
         impl$(<$($life),*>)? $s$(<$($life),*>)? {
             fn profile($($field : &$field_ty),*) -> $crate::folding_set::FoldKey {
                 let mut key = $crate::folding_set::FoldKey::default();
-                $(key = key.add($field);)*
+                $(key.add($field);)*
                 key
             }
         }

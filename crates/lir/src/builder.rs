@@ -11,6 +11,9 @@ pub struct Builder<'ctx, 'm> {
     current_function: Option<ValueRef>,
     current_block: Option<Block>,
 
+    int_constants: HashMap<usize, ValueID>,
+    str_constants: HashMap<String, ValueID>,
+
     unresolved_breaks: Vec<BreakPH>,
 }
 
@@ -21,20 +24,32 @@ impl<'s, 'm> Builder<'s, 'm> {
             module,
             current_function: None,
             current_block: None,
+            int_constants: Default::default(),
+            str_constants: Default::default(),
             unresolved_breaks: Default::default(),
         }
     }
 
-    pub fn new_function(
+    pub fn new_function<S: ToString>(
         &mut self,
-        name: &str,
-        param_names: &[String],
+        name: S,
+        param_names: impl IntoIterator<Item = S>,
         return_ty: TyID,
         params: Vec<TyID>,
         is_var_args: bool,
-    ) -> ValueRef {
-        let ty = self.module.types.get_fn(&return_ty, params.as_slice());
-        self.module.add_fn(name, param_names, ty, is_var_args)
+        internal: bool,
+    ) -> ValueID {
+        let ty = self.module.types.get_fn(
+            is_var_args,
+            &return_ty,
+            params.as_slice(),
+        );
+        self.module.add_fn(
+            name.to_string(),
+            param_names.into_iter().map(|n| n.to_string()).collect(),
+            ty,
+            internal,
+        )
     }
 
     pub fn enter_function(&mut self, bir: bir::ID) {
@@ -47,9 +62,13 @@ impl<'s, 'm> Builder<'s, 'm> {
     }
 
     pub fn void_(&self) -> ValueRef {
-        let val = self.ctx().as_mod().void;
+        let val = ValueRef::new(self.ctx().as_mod().void);
         debug_assert_eq!(val.kind(self.ctx()), ValueKind::Void);
-        val.dup()
+        val
+    }
+
+    pub fn new_undef(&mut self, ty: TyID) -> ValueRef {
+        ValueRef::new(self.fn_mut().add_val(ValueKind::Undef, ty, None))
     }
 
     pub fn void_ty(&self) -> TyID {
@@ -78,22 +97,34 @@ impl<'s, 'm> Builder<'s, 'm> {
     }
 
     pub fn new_int_constant(&mut self, n: usize, ty: TyID) -> ValueRef {
-        self.module.add_int_constant(n, ty)
+        let id = *self
+            .int_constants
+            .entry(n)
+            .or_insert_with(|| self.module.add_int_constant(n, ty));
+        ValueRef::new(id)
     }
 
     pub fn new_str_constant(&mut self, s: impl ToString) -> ValueRef {
-        self.module.add_str_constant(s.to_string())
+        let s = s.to_string();
+        let id = *self
+            .str_constants
+            .entry(s)
+            .or_insert_with_key(|s| self.module.add_str_constant(s.clone()));
+        ValueRef::new(id)
     }
 
-    fn new_block_impl<'a>(&mut self, label: Option<&str>) -> Block {
+    fn new_block_impl<'a, S: Into<String>>(
+        &mut self,
+        label: Option<S>,
+    ) -> Block {
         let void_ty = self.void_ty();
-        let block = self.fn_mut().add_block(label, void_ty);
+        let block = self.fn_mut().add_block(label.map(|i| i.into()), void_ty);
         self.current_block = Some(block);
         block
     }
 
     pub fn new_block(&mut self) -> Block {
-        self.new_block_impl(None)
+        self.new_block_impl::<&str>(None)
     }
 
     pub fn new_labeled_block(&mut self, label: &str) -> Block {
@@ -109,22 +140,35 @@ impl<'s, 'm> Builder<'s, 'm> {
         self.current_block.unwrap()
     }
 
-    fn add_temp(&mut self, ty: TyID, ident: Option<&str>) -> ValueRef {
-        self.fn_mut().add_val(ValueKind::Inst, ty, ident)
+    fn add_temp<S: Into<String>>(
+        &mut self,
+        ty: TyID,
+        ident: Option<S>,
+    ) -> ValueRef {
+        ValueRef::new(self.fn_mut().add_val(
+            ValueKind::Inst,
+            ty,
+            ident.map(|i| i.into()),
+        ))
     }
 
-    fn add_inst(
+    fn add_inst<S: Into<String>>(
         &mut self,
         kind: InstKind,
         ty: TyID,
         lval: Option<ValueRef>,
         rvals: Vec<ValueRef>,
-        ident: Option<&str>,
+        ident: Option<S>,
     ) -> ValueRef {
         let current_block = self.current_block.expect("inst without block?");
-        let inst_val =
-            self.fn_mut()
-                .add_inst(kind, ty, current_block, lval, rvals, ident);
+        let inst_val = self.fn_mut().add_inst(
+            kind,
+            ty,
+            current_block,
+            lval,
+            rvals,
+            ident.map(|i| i.into()),
+        );
         lval.unwrap_or(inst_val)
     }
 
@@ -177,17 +221,6 @@ impl<'s, 'm> Builder<'s, 'm> {
         self.new_inst(InstKind::Var)
     }
 
-    pub fn new_offset(
-        &mut self,
-        base: ValueRef,
-        offset: ValueRef,
-    ) -> InstBuilder<'_, 's, 'm> {
-        self.assert_lval_expr(base);
-        self.assert_rval_expr(offset);
-        self.new_inst(InstKind::Offset)
-            .with_rvals(&[base.dup(), offset.dup()])
-    }
-
     pub fn new_load(&mut self, base: ValueRef) -> InstBuilder<'_, 's, 'm> {
         self.new_inst(InstKind::Load).with_rval(base.dup())
     }
@@ -212,6 +245,18 @@ impl<'s, 'm> Builder<'s, 'm> {
         self.assert_lval_expr(base);
         self.assert_rval_exprs(offsets);
         self.new_inst(InstKind::Subscript)
+            .with_rval(base.dup())
+            .add_rvals(offsets.into_iter().map(|op| op.dup()))
+    }
+
+    pub fn new_get_field(
+        &mut self,
+        base: ValueRef,
+        offsets: &[ValueRef],
+    ) -> InstBuilder<'_, 's, 'm> {
+        self.assert_lval_expr(base);
+        self.assert_rval_exprs(offsets);
+        self.new_inst(InstKind::GetField)
             .with_rval(base.dup())
             .add_rvals(offsets.into_iter().map(|op| op.dup()))
     }
@@ -286,8 +331,11 @@ impl<'s, 'm> Builder<'s, 'm> {
 
     pub fn new_jump_marker(&mut self) -> Marker {
         let void_ = self.void_();
-        let ty = self.void_ty();
-        let val = self.new_inst(InstKind::Jmp).with_rval(void_).ty(ty).build();
+        let val = self
+            .new_inst(InstKind::Jmp)
+            .with_rval(void_)
+            .void_ty()
+            .build();
         let block = self.current_block();
         Marker {
             block,
@@ -297,24 +345,22 @@ impl<'s, 'm> Builder<'s, 'm> {
     }
 
     pub fn new_jump(&mut self, dst: Block) -> ValueRef {
-        let void_ = self.void_ty();
         let current_block = self.current_block();
         self.fn_mut().add_block_edge(current_block, dst);
 
         let dst = dst.val(self.fn_()).dup();
         self.new_inst(InstKind::Jmp)
             .with_rval(dst)
-            .ty(void_)
+            .void_ty()
             .build()
     }
 
     pub fn new_branch_marker(&mut self) -> Marker {
         let void_ = self.void_();
-        let ty = self.void_ty();
         let val = self
             .new_inst(InstKind::Branch)
             .with_rvals(&[void_, void_, void_])
-            .ty(ty)
+            .void_ty()
             .build();
         let block = self.current_block();
         Marker {
@@ -370,7 +416,10 @@ impl Session<'_, '_> {
     }
 
     pub(crate) fn val_from_sema(&self, sema: &sema::ID) -> ValueRef {
-        self.value_mapping.get(sema)
+        self.value_mapping.try_get(sema).expect(&format!(
+            "no mapped value for {sema:?} ({:?})",
+            self.sema.kind(*sema)
+        ))
     }
 
     pub(crate) fn val_from_bir(&self, bir: &bir::ID) -> ValueRef {
@@ -406,20 +455,15 @@ impl TyMapping {
 
 #[derive(Debug, Default)]
 pub struct ValueMapping {
-    data: HashMap<sema::ID, ValueRef>,
+    data: HashMap<sema::ID, ValueID>,
 }
 
 impl ValueMapping {
     pub fn try_get(&self, id: &sema::ID) -> Option<ValueRef> {
-        self.data.get(id).copied()
+        self.data.get(id).map(|i| ValueRef::new(*i))
     }
 
-    pub fn get(&self, id: &sema::ID) -> ValueRef {
-        self.try_get(id)
-            .expect(&format!("no mapped value for {id:?}"))
-    }
-
-    pub fn insert(&mut self, sema: sema::ID, val: ValueRef) {
+    pub fn insert(&mut self, sema: sema::ID, val: ValueID) {
         self.data.insert(sema, val);
     }
 }
@@ -451,15 +495,20 @@ impl<'b, 'ctx, 'm> InstBuilder<'b, 'ctx, 'm> {
 }
 
 impl InstBuilder<'_, '_, '_> {
-    pub fn ty(mut self, v: TyID) -> Self {
+    pub fn of_ty(mut self, v: TyID) -> Self {
         debug_assert!(self.ty.is_none());
         self.ty = Some(v);
         self
     }
 
-    pub fn named(mut self, v: impl ToString) -> Self {
+    pub fn void_ty(self) -> Self {
+        let void_ = self.builder.void_ty();
+        self.of_ty(void_)
+    }
+
+    pub fn named(mut self, v: impl Into<String>) -> Self {
         debug_assert!(self.name.is_none());
-        self.name = Some(v.to_string());
+        self.name = Some(v.into());
         self
     }
 
@@ -470,15 +519,15 @@ impl InstBuilder<'_, '_, '_> {
         self
     }
 
-    pub fn lval_or_create(self, v: Option<ValueRef>) -> Self {
+    pub fn with_lval_or_new(self, v: Option<ValueRef>) -> Self {
         if let Some(v) = v {
             self.with_lval(v)
         } else {
-            self.create_lval()
+            self.with_new_lval()
         }
     }
 
-    pub fn create_lval(mut self) -> Self {
+    pub fn with_new_lval(mut self) -> Self {
         self.should_create_lval = true;
         self
     }
@@ -549,7 +598,7 @@ impl<'s> Builder<'s, '_> {
 
         let dst = dst.val(self.fn_()).dup().with_parent(m.val.id);
 
-        let inst = m.val.inst_mut(self.fn_mut()).unwrap();
+        let inst = m.val.inst_mut(self.fn_mut());
         let jmp = inst.val;
         let old_dst = std::mem::replace(&mut inst.rvals[0], dst);
         debug_assert_eq!(old_dst.kind(self.ctx()), ValueKind::Void);
@@ -567,14 +616,16 @@ impl<'s> Builder<'s, '_> {
 
         self.assert_rval_expr(cond);
         let cond = cond.with_parent(m.val.id);
+        self.fn_mut().locals.add_user(cond.id, m.val.id);
+
         let then = then.val(self.fn_()).dup().with_parent(m.val.id);
         let alt = alt.val(self.fn_()).dup().with_parent(m.val.id);
 
         let f = self.fn_mut();
-        f.add_block_edge(m.block, f.block(then));
-        f.add_block_edge(m.block, f.block(alt));
+        f.add_block_edge(m.block, f.block(&then.id));
+        f.add_block_edge(m.block, f.block(&alt.id));
 
-        let inst = m.val.inst_mut(f).unwrap();
+        let inst = m.val.inst_mut(f);
         let br = inst.val;
         let old0 = std::mem::replace(&mut inst.rvals[0], cond);
         let old1 = std::mem::replace(&mut inst.rvals[1], then);

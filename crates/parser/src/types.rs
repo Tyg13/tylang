@@ -1,9 +1,9 @@
-use crate::green::Subtokens;
+use cst::green::Subtokens;
 
 use super::*;
 
 pub struct Parser<'tokens> {
-    tokens: &'tokens mut dyn TokenSource,
+    tokens: &'tokens dyn TokenSource,
     token_index: usize,
     events: Vec<Event>,
     follow_stack: Vec<HashSet<SyntaxKind>>,
@@ -72,7 +72,7 @@ impl CompletedMarker {
 }
 
 impl<'tokens> Parser<'tokens> {
-    pub fn new(tokens: &'tokens mut dyn TokenSource) -> Self {
+    pub fn new(tokens: &'tokens dyn TokenSource) -> Self {
         Self {
             tokens,
             token_index: 0,
@@ -146,10 +146,25 @@ impl<'tokens> Parser<'tokens> {
     }
 
     pub fn maybe(&mut self, kind: SyntaxKind) -> bool {
-        self.advance_to_next_non_trivia();
-        let found = self.at(kind);
+        let (_, idx) = self.peek_next_non_trivia();
+        let found = self.kind_at(idx, kind);
+        if found {
+            self.advance_to_next_non_trivia();
+        }
         self.follow_set_mut().remove(&kind);
         found
+    }
+
+    pub fn peek_next_non_trivia(&self) -> (SyntaxKind, usize) {
+        // Arbitrarily upper bound at 20 -- if we hit this limit, the assert
+        // will fire and we can up the value.
+        for n in 0..20 {
+            let kind = self.lookahead(n);
+            if !kind.is_trivia() {
+                return (kind, n);
+            }
+        }
+        panic!("way more trivia tokens than expected? (>20)")
     }
 
     pub fn advance_to_next_non_trivia(&mut self) -> SyntaxKind {
@@ -174,8 +189,22 @@ impl<'tokens> Parser<'tokens> {
     }
 
     pub fn add_to_follow_set(&mut self, kinds: &[SyntaxKind]) {
-        for kind in kinds {
-            self.follow_set_mut().insert(*kind);
+        self.follow_set_mut().extend(kinds)
+    }
+
+    pub fn kind_at(&self, idx: usize, kind: SyntaxKind) -> bool {
+        match kind.subtokens() {
+            Subtokens::One(t1) => self.lookahead(idx + 0) == t1,
+            Subtokens::Two(t1, t2) => {
+                (self.lookahead(idx + 0), self.lookahead(idx + 1)) == (t1, t2)
+            }
+            Subtokens::Three(t1, t2, t3) => {
+                (
+                    self.lookahead(idx + 0),
+                    self.lookahead(idx + 1),
+                    self.lookahead(idx + 2),
+                ) == (t1, t2, t3)
+            }
         }
     }
 
@@ -192,24 +221,32 @@ impl<'tokens> Parser<'tokens> {
         }
     }
 
-    pub fn expect_token(&mut self, kind: SyntaxKind) {
+    pub fn maybe_token(&mut self, kind: SyntaxKind) {
+        if self.maybe(kind) {
+            self.token(kind);
+        }
+    }
+
+    // TODO: should this return Result<()> instead?
+    // might be able to handle failure cases better
+    pub fn expect_token(&mut self, kind: SyntaxKind) -> bool {
         let actual_kind = self.advance_to_next_non_trivia();
-        if !self.at(kind) {
+        let found = self.at(kind);
+        if found {
+            self.token(kind);
+        } else {
             self.error(format!(
                 "unexpected token {actual_kind:?} (expected {kind:?})"
             ));
-            if let Some(kind) = self.skip_until_expected() {
-                self.token(kind);
-            }
-            self.remove_follow(kind);
-        } else {
-            self.token(kind);
-        }
+            self.skip_until_expected();
+        };
+        self.remove_follow(kind);
+        found
     }
 }
 
 impl Parser<'_> {
-    fn step(&mut self) {
+    pub(crate) fn step(&mut self) {
         self.steps = self.steps.saturating_add(1);
         if self.steps >= 1000000 {
             panic!("parser might be stuck");
@@ -227,17 +264,12 @@ impl Parser<'_> {
         }
     }
 
-    fn skip_token(&mut self) {
-        self.token(ERROR);
-        self.advance();
-    }
-
-    fn skip_until_expected(&mut self) -> Option<SyntaxKind> {
+    fn skip_until_expected(&mut self) {
         loop {
             match self.advance_to_next_non_trivia() {
-                SyntaxKind::EOF => break None,
-                kind if self.follow_set().contains(&kind) => break Some(kind),
-                _ => self.skip_token(),
+                SyntaxKind::EOF => break,
+                kind if self.follow_set().contains(&kind) => break,
+                kind => self.token(kind),
             }
         }
     }

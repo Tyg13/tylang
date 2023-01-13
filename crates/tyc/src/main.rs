@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use std::fs;
+use std::sync::Arc;
 
 use ast::Node;
 
@@ -10,6 +11,8 @@ enum Error {
     ReadingInput(std::io::Error),
     UnknownAction(String),
     SemanticErrors(usize),
+    BuildingCST,
+    ParsingAST,
 }
 
 impl std::fmt::Display for Error {
@@ -20,6 +23,8 @@ impl std::fmt::Display for Error {
                 write!(f, "unknown action: {action}")
             }
             Self::SemanticErrors(n) => write!(f, "{n} semantic errors"),
+            Self::BuildingCST => write!(f, "building CST"),
+            Self::ParsingAST => write!(f, "parsing AST"),
         }
     }
 }
@@ -57,7 +62,7 @@ fn main() -> () {
             sema: None,
         };
 
-        let module_lexed = cst::parser::Input::lex(&module_string);
+        let module_lexed = parser::Input::lex(&module_string);
         if let Some("tokens") = action {
             if !args.quiet {
                 println!("{:#?}", module_lexed.tokens());
@@ -65,7 +70,7 @@ fn main() -> () {
             return Ok(());
         }
 
-        let module_cst = cst::parser::parse(module_lexed);
+        let module_cst = parser::parse(module_lexed);
         if !module_cst.errors.is_empty() {
             if !args.quiet {
                 for error in module_cst.errors {
@@ -91,7 +96,19 @@ fn main() -> () {
             return Ok(());
         }
 
-        let module_bir = bir::translate::ast(&module_ast);
+        let module_bir = {
+            struct AstBuilder;
+            impl bir::translate::AstBuilder for AstBuilder {
+                type Error = crate::Error;
+                fn build(
+                    &mut self,
+                    module_name: &str,
+                ) -> Result<Arc<ast::Module>, Error> {
+                    parse_ast(&format!("{module_name}.ty"))
+                }
+            }
+            bir::translate::ast(&module_ast, &mut AstBuilder)
+        };
         if let Some("bir") = action {
             if !args.quiet {
                 bir::print(&module_bir);
@@ -139,9 +156,16 @@ fn main() -> () {
             return Err(Error::SemanticErrors(num_sema_errors));
         }
 
-        let module_lir = lir::translate(&module_bir, &module_sema);
+        let mut module_lir = lir::translate(&module_bir, &module_sema);
         if let Some("lir") = action {
             lir::print(&module_lir);
+            if args.optimize {
+                lir::pass::run_pass(
+                    &mut module_lir,
+                    &mut lir::passes::JumpThreading,
+                );
+                lir::pass::run_pass(&mut module_lir, &mut lir::passes::DCE);
+            }
             return Ok(());
         }
 
@@ -167,6 +191,17 @@ fn main() -> () {
         eprintln!("error: {e}");
         std::process::exit(1)
     });
+}
+
+fn parse_ast(input: &str) -> Result<Arc<ast::Module>, Error> {
+    let module_string = read_source(input)?;
+    let module_lexed = parser::Input::lex(&module_string);
+    let module_cst = parser::parse(module_lexed);
+    if !module_cst.errors.is_empty() {
+        return Err(Error::BuildingCST);
+    }
+
+    ast::Module::cast(module_cst.root.clone()).ok_or(Error::ParsingAST)
 }
 
 fn report_sema_errs(module_sema: &sema::Map, module_ctx: &ModuleCtx) -> usize {
@@ -255,6 +290,26 @@ fn report_sema_err(ctx: &ModuleCtx, err: &sema::errors::Error) {
                     ctx.sema_ctx_with_label(expr, &ctx.type_of(expr)),
                 )
             }
+            ErrorKind::InvalidField => {
+                let expr = &err.ids[0];
+                format!(
+                    "Invalid field: `{}`",
+                    ctx.sema_ctx_with_label(expr, &ctx.type_of(expr)),
+                )
+            }
+            ErrorKind::InvalidCallReceiver => {
+                let expr = &err.ids[0];
+                let kind = ctx.syntax_of(expr).unwrap().kind();
+                format!("Cannot call field with: `{kind:?}`")
+            }
+            ErrorKind::InvalidFieldReceiver => {
+                let expr = &err.ids[0];
+                let ty = ctx.type_of(expr);
+                format!(
+                    "Cannot index into `{ty}` as a struct:\n{}",
+                    ctx.sema_ctx_with_label(expr, &ty)
+                )
+            }
         }
     );
 }
@@ -319,8 +374,8 @@ impl ModuleCtx<'_> {
 
     fn syntax_of(&self, id: &sema::ID) -> Option<cst::syntax::Node> {
         let bir_id = self.sema().bir(*id)?;
-        let ast = self.bir().ast(&bir_id);
-        ast.map(|node| node.syntax().clone())
+        let ast = self.bir().ast(&bir_id)?;
+        Some(ast.syntax().clone())
     }
 }
 
@@ -337,6 +392,6 @@ fn read_source(input_path: &str) -> Result<String, Error> {
     }
 }
 
-fn pretty_print(output: &cst::parser::Output) {
+fn pretty_print(output: &parser::Output) {
     println!("{}", output.root);
 }

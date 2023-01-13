@@ -74,7 +74,7 @@ impl Node {
     }
 
     #[inline]
-    pub fn parents(&self) -> impl Iterator<Item = Node> + '_ {
+    pub fn ancestors(&self) -> impl Iterator<Item = Node> + '_ {
         std::iter::successors(Some(self.clone()), Self::parent)
     }
 
@@ -138,6 +138,11 @@ impl Node {
     }
 
     #[inline]
+    pub fn num_children(&self) -> usize {
+        self.green.children.len()
+    }
+
+    #[inline]
     pub fn children_with_tokens(
         &self,
     ) -> impl Iterator<Item = NodeOrToken> + '_ {
@@ -184,7 +189,7 @@ impl Node {
     }
 
     #[inline]
-    pub fn as_node_or_token(self) -> NodeOrToken {
-        NodeOrToken::Node(self)
+    pub fn as_node_or_token(&self) -> NodeOrToken {
+        NodeOrToken::Node(self.clone())
     }
 }

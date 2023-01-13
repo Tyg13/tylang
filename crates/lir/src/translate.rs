@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
+
 use crate::builder::Session;
 use crate::types::*;
 use crate::Builder;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum ValueCategory {
     LVal,
     RVal,
@@ -16,24 +19,37 @@ pub fn translate(bir: &bir::Map, sema: &sema::Map) -> Module {
     map_sema_tys_to_lir_tys(&mut builder);
 
     let get_full_name = |f: &bir::Function| {
+        if f.is_extern {
+            return f.identifier.clone();
+        }
         let mut parts = Vec::new();
         let mut parent = Some(f.mod_);
         while let Some(mod_) = parent {
             let mod_ = builder.sess.bir.mod_(&mod_);
-            if let Some(ref name) = mod_.name {
+            if let Some(ref name) = mod_.ident {
                 parts.push(name.clone());
             }
             parent = mod_.parent;
         }
         parts.reverse();
         parts.push(f.identifier.clone());
-        parts.join("$")
+        parts.join(".")
     };
+
+    let mut fns_seen: HashMap<String, ValueID> = HashMap::new();
+    let mut fns_with_unprocessed_bodies = Vec::new();
 
     for mod_ in bir.modules() {
         for bir_f in mod_.functions(builder.sess.bir) {
             let sema = builder.sess.bir_to_sema(&bir_f.id);
             let sema_fn = builder.sess.sema.fn_(sema).unwrap();
+
+            let full_name = get_full_name(bir_f);
+
+            if let Some(val) = fns_seen.get(&full_name) {
+                builder.sess.value_mapping.insert(sema, *val);
+                continue;
+            }
 
             let return_ty = builder.sess.sema_to_ty(&sema_fn.return_ty);
             let mut param_names = Vec::new();
@@ -45,15 +61,20 @@ pub fn translate(bir: &bir::Map, sema: &sema::Map) -> Module {
                     .push(builder.sess.sema.name(sema).unwrap().ident.clone());
             }
             let is_var_args = sema_fn.is_var_args(builder.sess.sema);
+            let internal =
+                builder.sess.sema.num_callers(sema) > 0 && bir_f.body.is_some();
             let val = builder.new_function(
-                &get_full_name(bir_f),
-                &param_names,
+                full_name.clone(),
+                param_names,
                 return_ty,
                 param_tys,
                 is_var_args,
+                internal,
             );
             builder.sess.value_mapping.insert(sema, val);
-            let f = builder.module.fn_(&val.id);
+            fns_seen.insert(full_name, val);
+
+            let f = builder.module.fn_(&val);
             for (idx, param) in bir_f.parameters.iter().enumerate() {
                 let param = builder.sess.bir_to_sema(param);
                 builder
@@ -61,13 +82,14 @@ pub fn translate(bir: &bir::Map, sema: &sema::Map) -> Module {
                     .value_mapping
                     .insert(param, f.nth_param(idx).val);
             }
+            if bir_f.body.is_some() {
+                fns_with_unprocessed_bodies.push(bir_f.id);
+            }
         }
     }
 
-    for mod_ in bir.modules() {
-        for f in mod_.functions(builder.sess.bir) {
-            fn_(&mut builder, f);
-        }
+    for id in fns_with_unprocessed_bodies {
+        fn_body(&mut builder, bir.fn_(&id));
     }
 
     module
@@ -91,15 +113,30 @@ fn map_sema_tys_to_lir_tys(builder: &mut Builder) {
                     map_ty(builder.sess.sema.ty(*pointee).unwrap(), builder);
                 builder.module.types.get_pointer_to(&pointee)
             }
-            sema::TypeKind::Aggregate(struct_ty) => todo!(),
+            sema::TypeKind::Aggregate(struct_ty) => {
+                let members: Vec<_> = struct_ty
+                    .members(builder.sess.sema)
+                    .map(|ty| map_ty(ty, builder))
+                    .collect();
+                builder.module.types.get_struct(
+                    &struct_ty.name(builder.sess.sema).unwrap().ident,
+                    members.as_slice(),
+                )
+            }
             sema::TypeKind::Function(fn_ty) => {
-                let return_ty =
-                    map_ty(fn_ty.return_ty(builder.sess.sema), builder);
+                let return_ty = map_ty(
+                    fn_ty.return_ty(builder.sess.sema).unwrap(),
+                    builder,
+                );
                 let params: Vec<_> = fn_ty
                     .param_tys(builder.sess.sema)
                     .map(|param| map_ty(param, builder))
                     .collect();
-                builder.module.types.get_fn(&return_ty, &params)
+                builder.module.types.get_fn(
+                    fn_ty.is_var_args,
+                    &return_ty,
+                    &params,
+                )
             }
             sema::TypeKind::Prototype | sema::TypeKind::Marker => {
                 unreachable!()
@@ -114,19 +151,22 @@ fn map_sema_tys_to_lir_tys(builder: &mut Builder) {
     }
 }
 
-fn fn_(builder: &mut Builder, f: &bir::Function) {
+fn fn_body(builder: &mut Builder, f: &bir::Function) {
     builder.enter_function(f.id);
     if let Some(body) = f.body(builder.sess.bir) {
         let ty = builder.sess.ty_from_bir(&body.id);
         builder.new_labeled_block(".entry");
-        let lval = if ty.get(builder.ctx()).is_void() {
-            None
-        } else {
-            Some(builder.new_var().named(".ret").ty(ty).create_lval().build())
-        };
+        let lval = ty.get(builder.ctx()).has_lval().then(|| {
+            builder
+                .new_var()
+                .named(".ret")
+                .of_ty(ty)
+                .with_new_lval()
+                .build()
+        });
         scope_(builder, lval, body);
         let ret_val = lval.dup().unwrap_or(builder.void_());
-        builder.new_return(ret_val).ty(ty).build();
+        builder.new_return(ret_val).of_ty(ty).build();
     }
     builder.exit_function(f.id);
 }
@@ -159,11 +199,11 @@ fn scope_(
         let ty = builder.sess.sema_to_ty(&sema);
         let var = builder
             .new_var()
-            .ty(ty)
-            .create_lval()
-            .named(let_.name.clone())
+            .of_ty(ty)
+            .with_new_lval()
+            .named(&let_.ident)
             .build();
-        builder.sess.value_mapping.insert(sema, var);
+        builder.sess.value_mapping.insert(sema, var.id);
     }
 
     for it in scope.items(builder.sess.bir) {
@@ -237,7 +277,7 @@ fn value(
             debug_assert_ne!(cat, ValueCategory::LVal);
             let val = literal(builder, sema);
             if let Some(lval) = lval {
-                return builder.new_copy(val).with_lval(lval).ty(ty).build();
+                return builder.new_copy(val).with_lval(lval).of_ty(ty).build();
             }
             val
         }
@@ -248,7 +288,7 @@ fn value(
                 return builder
                     .new_copy(named_val)
                     .with_lval(lval)
-                    .ty(ty)
+                    .of_ty(ty)
                     .build();
             }
             named_val
@@ -264,21 +304,25 @@ fn value(
                 .as_fn_ty()
                 .return_ty(builder.ctx())
                 .is_void();
-            let mut call = builder.new_call(called_fn, ops).ty(ty);
+            let mut call = builder.new_call(called_fn, ops).of_ty(ty);
             if call_has_lval {
-                call = call.lval_or_create(lval);
+                call = call.with_lval_or_new(lval);
             }
             call.build()
         }
         bir::ExprKind::Index { receiver, index } => {
+            let base = rvalue(builder, None, builder.sess.bir.expr(receiver));
             let offset = rvalue(builder, None, builder.sess.bir.expr(index));
-            let base = lvalue(builder, builder.sess.bir.expr(receiver));
-            let offset = builder.new_offset(base, offset).ty(ty);
+            let subscr = builder.new_subscript(base, &[offset]).of_ty(ty);
             match cat {
-                ValueCategory::LVal => offset.lval_or_create(lval).build(),
+                ValueCategory::LVal => subscr.with_new_lval().build(),
                 ValueCategory::RVal => {
-                    let offset = offset.create_lval().build();
-                    builder.new_load(offset).ty(ty).lval_or_create(lval).build()
+                    let subscr = subscr.with_new_lval().build();
+                    builder
+                        .new_load(subscr)
+                        .of_ty(ty)
+                        .with_lval_or_new(lval)
+                        .build()
                 }
             }
         }
@@ -294,15 +338,19 @@ fn value(
         }
         bir::ExprKind::Cast { val, .. } => {
             let val = rvalue(builder, None, builder.sess.bir.expr(val));
-            builder.new_cast(val).ty(ty).lval_or_create(lval).build()
+            builder
+                .new_cast(val)
+                .of_ty(ty)
+                .with_lval_or_new(lval)
+                .build()
         }
         bir::ExprKind::Return { expr } => {
             let ret = if let Some(expr) = expr {
                 let ty = builder.sess.ty_from_bir(expr);
                 let val = rvalue(builder, None, builder.sess.bir.expr(expr));
-                builder.new_return(val).ty(ty).build()
+                builder.new_return(val).of_ty(ty).build()
             } else {
-                builder.new_return(builder.void_()).ty(ty).build()
+                builder.new_return(builder.void_()).of_ty(ty).build()
             };
             builder.new_block();
             ret
@@ -336,7 +384,7 @@ fn value(
             jmp_to_latch
         }
     };
-    builder.sess.value_mapping.insert(sema, val);
+    builder.sess.value_mapping.insert(sema, val.id);
     val
 }
 
@@ -355,7 +403,11 @@ fn field_access_expr(
         let ty = builder.sess.sema_to_ty(&sema);
         builder.new_int_constant(offset, ty)
     };
-    let addr = builder.new_subscript(base, &[rhs]).ty(ty).build();
+    let addr = builder
+        .new_get_field(base, &[rhs])
+        .of_ty(ty)
+        .with_new_lval()
+        .build();
     match cat {
         ValueCategory::LVal => addr,
         ValueCategory::RVal => {
@@ -363,7 +415,11 @@ fn field_access_expr(
                 let base_ty = base.ty(builder.ctx()).id;
                 builder.ctx_mut().types().get_pointer_to(&base_ty)
             };
-            builder.new_load(addr).ty(ty).lval_or_create(lval).build()
+            builder
+                .new_load(addr)
+                .of_ty(ty)
+                .with_lval_or_new(lval)
+                .build()
         }
     }
 }
@@ -434,10 +490,10 @@ fn op_expr(
             builder.new_cmp(CmpKind::Gte, lhs, rhs)
         }
         bir::OpKind::Equals => builder.new_cmp(CmpKind::Eq, lhs, rhs),
+        bir::OpKind::NotEquals => builder.new_cmp(CmpKind::Ne, lhs, rhs),
         bir::OpKind::Assignment | bir::OpKind::FieldAccess => unreachable!(),
-        bir::OpKind::ScopeAccess => todo!(),
     }
-    .ty(ty)
-    .lval_or_create(lval)
+    .of_ty(ty)
+    .with_lval_or_new(lval)
     .build()
 }

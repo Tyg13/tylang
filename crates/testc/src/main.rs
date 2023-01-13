@@ -23,7 +23,9 @@ fn main() -> Result<()> {
 
         num_tests += 1;
         match run_test(&ty_file, &compiler_binary)? {
-            TestStatus::Pass => num_passes += 1,
+            TestStatus::Pass => {
+                num_passes += 1;
+            }
             TestStatus::CompFail(s) => {
                 println!("===========================");
                 println!("compfail: {}", ty_file.display());
@@ -39,10 +41,14 @@ fn main() -> Result<()> {
             }
         }
     }
+    let num_fails = num_tests - num_passes;
     println!("pass: {}", num_passes);
-    println!("fail: {}", num_tests - num_passes);
+    println!("fail: {}", num_fails);
     println!("total: {}", num_tests);
 
+    if num_fails > 0 {
+        std::process::exit(-1)
+    }
     Ok(())
 }
 

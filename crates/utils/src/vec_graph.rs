@@ -1,7 +1,16 @@
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Copy)]
-pub struct Edge<T>(NodeRef<T>, NodeRef<T>);
+#[derive(Debug)]
+pub struct Edge<T>(Vertex<T>, Vertex<T>);
+
+impl<T> Clone for Edge<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Edge(self.0.clone(), self.1.clone())
+    }
+}
+
+impl<T> Copy for Edge<T> {}
 
 impl<T> PartialEq for Edge<T> {
     #[inline]
@@ -12,13 +21,21 @@ impl<T> PartialEq for Edge<T> {
 
 impl<T> Eq for Edge<T> {}
 
+impl<T> std::hash::Hash for Edge<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+        self.1.hash(state);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VecGraph<T> {
     pub(crate) vertices: Vec<T>,
-    pub(crate) edges: Vec<Edge<T>>,
-    pub(crate) predecessors: Vec<Vec<NodeRef<T>>>,
-    pub(crate) successors: Vec<Vec<NodeRef<T>>>,
-    pub(crate) start: Option<NodeRef<T>>,
+    pub(crate) predecessors: Vec<Vec<Vertex<T>>>,
+    pub(crate) successors: Vec<Vec<Vertex<T>>>,
+    pub(crate) start: Option<Vertex<T>>,
+
+    unlinked_vertices: Vec<Vertex<T>>,
 }
 
 impl<T> std::default::Default for VecGraph<T> {
@@ -32,95 +49,149 @@ impl<T> VecGraph<T> {
     pub fn new() -> Self {
         Self {
             vertices: Default::default(),
-            edges: Default::default(),
             predecessors: Default::default(),
             successors: Default::default(),
             start: None,
+            unlinked_vertices: Default::default(),
         }
     }
 
     #[inline]
-    pub fn add_vertex(&mut self, vertex: T) -> NodeRef<T> {
-        let node = NodeRef::new(self.vertices.len());
-        if self.start.is_none() {
-            self.set_start(node);
+    pub fn add_vertex(&mut self, data: T) -> Vertex<T> {
+        let v = Vertex::new(self.vertices.len());
+        if let None = &self.start {
+            self.start = Some(v);
         }
-        self.vertices.push(vertex);
-        self.predecessors.push(Vec::new());
-        self.predecessors.push(Vec::new());
-        self.successors.push(Vec::new());
-        node
+        self.vertices.push(data);
+        self.predecessors.push(Default::default());
+        self.successors.push(Default::default());
+        v
     }
 
     #[inline]
-    pub fn add_successor(&mut self, node: NodeRef<T>, vertex: T) -> NodeRef<T> {
-        let succ = self.add_vertex(vertex);
-        self.add_edge(node, succ);
+    pub fn add_successor(&mut self, v: Vertex<T>, data: T) -> Vertex<T> {
+        let succ = self.add_vertex(data);
+        self.add_edge(v, succ);
         succ
     }
 
     #[inline]
-    pub fn add_predecessor(
-        &mut self,
-        node: NodeRef<T>,
-        vertex: T,
-    ) -> NodeRef<T> {
-        let pred = self.add_vertex(vertex);
-        self.add_edge(pred, node);
+    pub fn add_predecessor(&mut self, v: Vertex<T>, data: T) -> Vertex<T> {
+        let pred = self.add_vertex(data);
+        self.add_edge(pred, v);
         pred
     }
 
     #[inline]
-    pub fn add_edge(&mut self, from: NodeRef<T>, to: NodeRef<T>) {
-        let edge = Edge(from, to);
-        if self.edges.contains(&edge) {
-            return;
+    pub fn add_edge(&mut self, from: Vertex<T>, to: Vertex<T>) -> bool {
+        if self.predecessors[from.idx].contains(&to) {
+            debug_assert!(self.successors[to.idx].contains(&from));
+            return false;
         }
-        self.edges.push(edge);
         self.successors[from.idx].push(to);
         self.predecessors[to.idx].push(from);
-    }
-
-    pub fn start(&self) -> NodeRef<T> {
-        self.start.unwrap()
-    }
-
-    pub fn set_start(&mut self, node: NodeRef<T>) {
-        self.start = Some(node);
+        true
     }
 
     #[inline]
-    pub fn last(&self) -> Option<NodeRef<T>> {
-        self.vertices().last()
+    pub fn unlink(&mut self, vs: &[Vertex<T>]) {
+        let mut successors_to_remove = HashSet::new();
+        let mut predecessors_to_remove = HashSet::new();
+        for v in vs {
+            for succ in &self.successors[v.idx] {
+                predecessors_to_remove.insert(*succ);
+            }
+            for pred in &self.predecessors[v.idx] {
+                successors_to_remove.insert(*pred);
+            }
+        }
+        for succ in successors_to_remove {
+            self.successors[succ.idx].retain(|v| !vs.contains(v));
+        }
+        for pred in predecessors_to_remove {
+            self.predecessors[pred.idx].retain(|v| !vs.contains(v));
+        }
+        for v in vs {
+            self.successors[v.idx].clear();
+            self.predecessors[v.idx].clear();
+        }
+        self.unlinked_vertices.extend(vs);
+        if self.start.map_or(false, |v| vs.contains(&v)) {
+            self.start = None;
+        }
+    }
+
+    pub fn start(&self) -> Vertex<T> {
+        self.start.unwrap()
+    }
+
+    pub fn set_start(&mut self, v: Vertex<T>) {
+        self.start = Some(v);
     }
 
     #[inline]
     pub fn num_vertices(&self) -> usize {
-        self.vertices.len()
+        self.vertices.len() - self.unlinked_vertices.len()
     }
 
     #[inline]
-    pub fn vertices(&self) -> impl Iterator<Item = NodeRef<T>> + '_ {
-        (0..self.vertices.len()).map(|i| NodeRef::new(i))
+    pub fn vertices(&self) -> impl Iterator<Item = Vertex<T>> + '_ {
+        (0..self.vertices.len()).map(|i| Vertex::new(i))
     }
 
     #[inline]
-    pub fn successors(&self, node: &NodeRef<T>) -> &[NodeRef<T>] {
-        self.successors[node.idx].as_slice()
+    pub fn edges(&self) -> impl Iterator<Item = Edge<T>> + '_ {
+        self.successors.iter().enumerate().flat_map(|(idx, succs)| {
+            succs.iter().map(move |s| Edge(Vertex::new(idx), *s))
+        })
     }
 
     #[inline]
-    pub fn predecessors(&self, node: &NodeRef<T>) -> &[NodeRef<T>] {
-        self.predecessors[node.idx].as_slice()
+    pub fn successors(&self, v: &Vertex<T>) -> &[Vertex<T>] {
+        self.successors[v.idx].as_slice()
+    }
+
+    #[inline]
+    pub fn predecessors(&self, v: &Vertex<T>) -> &[Vertex<T>] {
+        self.predecessors[v.idx].as_slice()
+    }
+
+    #[inline]
+    pub fn out_degree(&self, v: &Vertex<T>) -> usize {
+        self.successors[v.idx].len()
+    }
+
+    #[inline]
+    pub fn in_degree(&self, v: &Vertex<T>) -> usize {
+        self.predecessors[v.idx].len()
+    }
+
+    #[inline]
+    pub fn is_unlinked(&self, v: &Vertex<T>) -> bool {
+        self.unlinked_vertices.contains(v)
     }
 }
 
 impl<T: PartialEq> VecGraph<T> {
-    pub fn find_vertex(&self, data: &T) -> Option<NodeRef<T>> {
+    pub fn find_first(&self, data: &T) -> Option<Vertex<T>> {
         self.vertices
             .iter()
             .enumerate()
-            .find_map(|(idx, v)| (v == data).then(|| NodeRef::new(idx)))
+            .find_map(|(idx, v)| (v == data).then(|| Vertex::new(idx)))
+    }
+
+    pub fn find_all<'this, 'a: 'this>(
+        &'this self,
+        data: &'a T,
+    ) -> impl Iterator<Item = Vertex<T>> + 'this {
+        self.vertices
+            .iter()
+            .enumerate()
+            .filter_map(move |(idx, v)| (v == data).then(|| Vertex::new(idx)))
+    }
+
+    pub fn collect_all(&self, data: &T) -> Vec<Vertex<T>> {
+        self.find_all(data).collect()
     }
 }
 
@@ -128,14 +199,13 @@ impl<T: ToString> VecGraph<T> {
     pub fn to_dot_string(&self) -> String {
         let indent = " ".repeat(3);
         let edges = self
-            .edges
-            .iter()
+            .edges()
             .map(|Edge(start, end)| {
                 format!("{indent}{} -> {};", start.idx, end.idx,)
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let nodes = self
+        let vertices = self
             .vertices
             .iter()
             .enumerate()
@@ -144,7 +214,7 @@ impl<T: ToString> VecGraph<T> {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        format!("digraph g {{\n{edges}\n{nodes}\n}}")
+        format!("digraph g {{\n{edges}\n{vertices}\n}}")
     }
 }
 
@@ -156,53 +226,53 @@ pub fn write_to_dot_file<T: ToString>(
 }
 
 #[derive(Debug)]
-pub struct NodeRef<T> {
+pub struct Vertex<T> {
     idx: usize,
     _data: std::marker::PhantomData<T>,
 }
 
-impl<T> std::hash::Hash for NodeRef<T> {
+impl<T> std::hash::Hash for Vertex<T> {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.idx.hash(state)
     }
 }
 
-impl<T> PartialEq for NodeRef<T> {
+impl<T> PartialEq for Vertex<T> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.idx == other.idx
     }
 }
 
-impl<T> Eq for NodeRef<T> {}
+impl<T> Eq for Vertex<T> {}
 
-impl<T> Clone for NodeRef<T> {
+impl<T> Clone for Vertex<T> {
     #[inline]
     fn clone(&self) -> Self {
         Self::new(self.idx)
     }
 }
 
-impl<T> Copy for NodeRef<T> {}
+impl<T> Copy for Vertex<T> {}
 
-impl<'graph, T: 'graph> NodeRef<T> {
+impl<'graph, T: 'graph> Vertex<T> {
     #[inline]
     fn new(idx: usize) -> Self {
-        NodeRef {
+        Vertex {
             idx,
             _data: std::marker::PhantomData,
         }
     }
 
     #[inline]
-    pub fn in_degree(&self, graph: &'graph VecGraph<T>) -> usize {
-        self.predecessors(graph).len()
+    pub fn out_degree(&self, graph: &'graph VecGraph<T>) -> usize {
+        graph.out_degree(self)
     }
 
     #[inline]
-    pub fn out_degree(&self, graph: &'graph VecGraph<T>) -> usize {
-        self.successors(graph).len()
+    pub fn in_degree(&self, graph: &'graph VecGraph<T>) -> usize {
+        graph.in_degree(self)
     }
 
     #[inline]
@@ -219,7 +289,7 @@ impl<'graph, T: 'graph> NodeRef<T> {
     pub fn successors(
         &self,
         graph: &'graph VecGraph<T>,
-    ) -> &'graph [NodeRef<T>] {
+    ) -> &'graph [Vertex<T>] {
         graph.successors(self)
     }
 
@@ -227,115 +297,114 @@ impl<'graph, T: 'graph> NodeRef<T> {
     pub fn predecessors(
         &self,
         graph: &'graph VecGraph<T>,
-    ) -> &'graph [NodeRef<T>] {
+    ) -> &'graph [Vertex<T>] {
         graph.predecessors(self)
     }
 }
 
-mod detail {
+pub mod traversal {
     use super::*;
     use std::collections::HashSet;
 
-    pub fn pre_post_order_impl<T, Pre, Post, const REVERSE: bool>(
+    fn pre_post_order_impl<T, Pre, Post, const REVERSE: bool>(
         graph: &VecGraph<T>,
-        node: NodeRef<T>,
-        visited: &mut HashSet<NodeRef<T>>,
+        vertex: Vertex<T>,
+        visited: &mut HashSet<Vertex<T>>,
         pre: &mut Pre,
         post: &mut Post,
     ) where
-        Pre: FnMut(NodeRef<T>),
-        Post: FnMut(NodeRef<T>),
+        Pre: FnMut(Vertex<T>),
+        Post: FnMut(Vertex<T>),
     {
-        if !visited.insert(node) {
+        if !visited.insert(vertex) {
             return;
         }
 
-        pre(node);
+        pre(vertex);
 
-        let visit = |successor: &NodeRef<_>| {
+        let visit = |successor: &Vertex<_>| {
             pre_post_order_impl::<T, _, _, REVERSE>(
                 graph, *successor, visited, pre, post,
             );
         };
-        let successors = node.successors(graph).iter();
+        let successors = vertex.successors(graph);
         if REVERSE {
-            successors.rev().for_each(visit)
+            successors.iter().rev().for_each(visit)
         } else {
-            successors.for_each(visit)
+            successors.iter().for_each(visit)
         }
 
-        post(node);
+        post(vertex);
     }
 
-    pub fn skip<T>(_: NodeRef<T>) {}
+    fn skip<T>(_: Vertex<T>) {}
 
     #[inline]
-    pub fn pre_post_order<T, Pre, Post, const REVERSE: bool>(
+    fn pre_post_order<T, Pre, Post, const REVERSE: bool>(
         graph: &VecGraph<T>,
         pre: &mut Pre,
         post: &mut Post,
     ) where
-        Pre: FnMut(NodeRef<T>),
-        Post: FnMut(NodeRef<T>),
+        Pre: FnMut(Vertex<T>),
+        Post: FnMut(Vertex<T>),
     {
         let mut visited = HashSet::new();
-        let start = graph.start();
-        pre_post_order_impl::<_, _, _, REVERSE>(
-            graph,
-            start,
-            &mut visited,
-            pre,
-            post,
-        );
+        graph.start.map(|start| {
+            pre_post_order_impl::<_, _, _, REVERSE>(
+                graph,
+                start,
+                &mut visited,
+                pre,
+                post,
+            );
+        });
     }
-}
 
-#[inline]
-pub fn pre_order<T, F>(graph: &VecGraph<T>, f: &mut F)
-where
-    F: FnMut(NodeRef<T>),
-{
-    detail::pre_post_order::<_, _, _, false>(graph, f, &mut detail::skip)
-}
+    #[inline]
+    pub fn pre_order<T, F>(graph: &VecGraph<T>, f: &mut F)
+    where
+        F: FnMut(Vertex<T>),
+    {
+        pre_post_order::<_, _, _, false>(graph, f, &mut skip)
+    }
 
-#[inline]
-pub fn post_order<T, F>(graph: &VecGraph<T>, f: &mut F)
-where
-    F: FnMut(NodeRef<T>),
-{
-    detail::pre_post_order::<_, _, _, false>(graph, &mut detail::skip, f)
-}
+    #[inline]
+    pub fn post_order<T, F>(graph: &VecGraph<T>, f: &mut F)
+    where
+        F: FnMut(Vertex<T>),
+    {
+        pre_post_order::<_, _, _, false>(graph, &mut skip, f)
+    }
 
-#[inline]
-pub fn reverse_post_order<T, F>(graph: &VecGraph<T>, f: &mut F)
-where
-    F: FnMut(NodeRef<T>),
-{
-    let mut nodes = Vec::with_capacity(graph.vertices.len());
-    detail::pre_post_order::<_, _, _, true>(
-        graph,
-        &mut detail::skip,
-        &mut |node| nodes.push(node),
-    );
-    nodes.iter().rev().for_each(|node| f(*node));
+    #[inline]
+    pub fn reverse_post_order<T, F>(graph: &VecGraph<T>, f: &mut F)
+    where
+        F: FnMut(Vertex<T>),
+    {
+        let mut vertices = Vec::with_capacity(graph.vertices.len());
+        pre_post_order::<_, _, _, true>(graph, &mut skip, &mut |v| {
+            vertices.push(v)
+        });
+        vertices.iter().rev().for_each(|v| f(*v));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn pred_string<T: ToString>(g: &VecGraph<T>, n: NodeRef<T>) -> String {
-        n.predecessors(&g)
+    fn pred_string<T: ToString>(g: &VecGraph<T>, v: Vertex<T>) -> String {
+        v.predecessors(&g)
             .iter()
-            .map(|node| node.data(&g).to_string())
+            .map(|v| v.data(&g).to_string())
             .collect::<Vec<_>>()
             .join(" ")
     }
 
-    fn succ_string<T: ToString>(g: &VecGraph<T>, n: NodeRef<T>) -> String {
-        n.successors(&g)
+    fn succ_string<T: ToString>(g: &VecGraph<T>, v: Vertex<T>) -> String {
+        v.successors(&g)
             .iter()
-            .map(|node| node.data(&g).to_string())
+            .map(|v| v.data(&g).to_string())
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -392,6 +461,73 @@ mod tests {
     }
 
     #[test]
+    fn unlink_one_vertex() {
+        let (g, a, b, c) = {
+            let mut g = VecGraph::new();
+            let a = g.add_vertex("a");
+            let b = g.add_successor(a, "b");
+            let c = g.add_successor(b, "c");
+            g.unlink(&[b]);
+            (g, a, b, c)
+        };
+        assert_eq!(g.num_vertices(), 2);
+        assert_eq!(a.out_degree(&g), 0);
+        assert_eq!(c.in_degree(&g), 0);
+        for e in g.edges() {
+            assert_ne!(e.0, b);
+            assert_ne!(e.1, b);
+        }
+    }
+
+    #[test]
+    fn unlink_multiple_vertices() {
+        let (g, a, b, c, d) = {
+            let mut g = VecGraph::new();
+            let a = g.add_vertex("a");
+
+            let b = g.add_successor(a, "b");
+            let c = g.add_successor(b, "c");
+
+            let d = g.add_vertex("d");
+            g.add_edge(a, d);
+            g.add_edge(b, d);
+            g.add_edge(c, d);
+
+            g.unlink(&[b, c]);
+            (g, a, b, c, d)
+        };
+        assert_eq!(g.num_vertices(), 2);
+        assert_eq!(a.out_degree(&g), 1);
+        assert_eq!(b.in_degree(&g), 0);
+        assert_eq!(c.in_degree(&g), 0);
+        assert_eq!(d.in_degree(&g), 1);
+        for e in g.edges() {
+            assert_ne!(e.0, b);
+            assert_ne!(e.1, b);
+            assert_ne!(e.0, c);
+            assert_ne!(e.1, c);
+        }
+    }
+
+    #[test]
+    fn unlink_start() {
+        let (g, a) = {
+            let mut g = VecGraph::new();
+            let a = g.add_vertex("a");
+            let b = g.add_successor(a, "b");
+            g.add_successor(b, "c");
+            g.unlink(&[a]);
+            (g, a)
+        };
+        assert_eq!(g.num_vertices(), 2);
+        assert_eq!(g.start, None);
+        for e in g.edges() {
+            assert_ne!(e.0, a);
+            assert_ne!(e.1, a);
+        }
+    }
+
+    #[test]
     fn dot_string() {
         let g = {
             let mut g = VecGraph::new();
@@ -428,8 +564,8 @@ mod tests {
             g
         };
         let mut out = Vec::new();
-        super::pre_order(&g, &mut |node| {
-            out.push(node.data(&g).to_string());
+        super::traversal::pre_order(&g, &mut |v| {
+            out.push(v.data(&g).to_string());
         });
         let pre_order_str = out.join(", ");
         debug_assert_eq!(pre_order_str, "A, B, D, C");
@@ -448,8 +584,8 @@ mod tests {
             g
         };
         let mut out = Vec::new();
-        super::post_order(&g, &mut |node| {
-            out.push(node.data(&g).to_string());
+        super::traversal::post_order(&g, &mut |v| {
+            out.push(v.data(&g).to_string());
         });
         let postorder_str = out.join(", ");
         debug_assert_eq!(postorder_str, "D, B, C, A");
@@ -468,10 +604,28 @@ mod tests {
             g
         };
         let mut out = Vec::new();
-        super::reverse_post_order(&g, &mut |node| {
-            out.push(node.data(&g).to_string());
+        super::traversal::reverse_post_order(&g, &mut |v| {
+            out.push(v.data(&g).to_string());
         });
         let rpo_str = out.join(", ");
         debug_assert_eq!(rpo_str, "A, B, C, D");
+    }
+
+    #[test]
+    fn find_first() {
+        let (g, b, b2, c) = {
+            let mut g = VecGraph::new();
+            let start = g.add_vertex('A');
+            let b = g.add_successor(start, 'B');
+            let b2 = g.add_successor(start, 'B');
+            let c = g.add_successor(start, 'C');
+            let d = g.add_vertex('D');
+            g.add_edge(b, d);
+            g.add_edge(c, d);
+            (g, b, b2, c)
+        };
+        assert_eq!(Some(b), g.find_first(&'B'));
+        assert_eq!(Some(c), g.find_first(&'C'));
+        assert_eq!(&[b, b2], g.collect_all(&'B').as_slice());
     }
 }

@@ -4,31 +4,32 @@ pub trait Visitor: Sized {
     fn visit(&mut self, node: NodeOrToken);
 }
 
-pub fn preorder<V: Visitor>(visitor: &mut V, node: NodeOrToken) {
+pub fn preorder<V: Visitor>(visitor: &mut V, node: impl Into<NodeOrToken>) {
+    let node = node.into();
     visitor.visit(node.clone());
     for child in node.children_with_tokens() {
         preorder(visitor, child);
     }
 }
 
-pub fn postorder<V: Visitor>(visitor: &mut V, node: NodeOrToken) {
+pub fn postorder<V: Visitor>(visitor: &mut V, node: impl Into<NodeOrToken>) {
+    let node = node.into();
     for child in node.children_with_tokens() {
         postorder(visitor, child);
     }
     visitor.visit(node);
 }
 
-pub enum Step<R> {
-    Continue(NodeOrToken),
+pub enum Step<N, R> {
+    Continue(N),
     Terminate(R),
 }
 
-pub fn iterate<R>(
-    node: NodeOrToken,
-    mut f: impl FnMut(NodeOrToken) -> Step<R>,
-) -> R {
-    match f(node) {
-        Step::Continue(node) => iterate(node, f),
-        Step::Terminate(result) => result,
+pub fn iterate<N, R>(mut cursor: N, mut f: impl FnMut(N) -> Step<N, R>) -> R {
+    loop {
+        match f(cursor) {
+            Step::Continue(next) => cursor = next,
+            Step::Terminate(result) => return result,
+        }
     }
 }

@@ -1,11 +1,19 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 use crate::types::*;
 
+static NAME_ID: AtomicU32 = AtomicU32::new(0);
+fn get_unique_name(mut n: String) -> String {
+    let id = NAME_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    n.push_str(&id.to_string());
+    n
+}
+
 pub struct Builder {
-    map: Map,
-    current_module: Option<ID>,
+    pub(crate) map: Map,
+    pub(crate) current_module: Option<ID>,
     current_function: Option<ID>,
     scope_stack: ScopeStack,
 
@@ -78,19 +86,27 @@ impl Builder {
         self.map.ast.insert(id, ast.clone());
     }
 
-    pub fn new_module(&mut self) -> ID {
+    pub fn new_module(&mut self, ast: Option<Arc<dyn ast::Node>>) -> ID {
         let id = self.new_node(Kind::Module);
         if self.map.modules.len() == 0 {
             self.map.root_module = Some(id);
         }
+        if let Some(ast) = ast {
+            self.set_ast(id, ast);
+        }
         self.map.modules.insert(id, Module::new(id));
         id
+    }
+
+    pub fn root_module(&self) -> Option<ID> {
+        self.map.root_module
     }
 
     pub fn new_typedef(
         &mut self,
         identifier: &str,
         members: Vec<TypeMember>,
+        ast: Option<Arc<dyn ast::Node>>,
     ) -> ID {
         let id = self.new_node(Kind::TypeDef);
         self.map.typedefs.insert(
@@ -103,10 +119,33 @@ impl Builder {
             },
         );
         self.current_module().typedefs.push(id);
+        if let Some(ast) = ast {
+            self.set_ast(id, ast);
+        }
         id
     }
 
-    pub fn new_function(&mut self, identifier: &str, return_type: ID) -> ID {
+    pub fn new_import(&mut self, name: String) -> ID {
+        let id = self.new_node(Kind::Import);
+        let module = self.current_module().id;
+        self.map.imports.insert(
+            id,
+            Import {
+                id,
+                parent: module,
+                name,
+            },
+        );
+        self.current_module().imports.push(id);
+        id
+    }
+
+    pub fn new_function(
+        &mut self,
+        identifier: &str,
+        return_type: ID,
+        ast: Option<Arc<dyn ast::Node>>,
+    ) -> ID {
         debug_assert!(self.map.typerefs.contains_key(&return_type));
 
         let id = self.new_node(Kind::Function);
@@ -115,16 +154,23 @@ impl Builder {
             self.current_module().id,
             identifier.to_string(),
             return_type,
-            false,
         );
         self.map.functions.insert(id, func);
 
         self.current_module().functions.push(id);
+        if let Some(ast) = ast {
+            self.set_ast(id, ast);
+        }
 
         id
     }
 
-    pub fn new_param(&mut self, identifier: String, ty: ID) -> ID {
+    pub fn new_param(
+        &mut self,
+        identifier: String,
+        ty: ID,
+        ast: Option<Arc<dyn ast::Node>>,
+    ) -> ID {
         debug_assert!(self.map.typerefs.contains_key(&ty));
 
         let id = self.new_node(Kind::Parameter);
@@ -132,12 +178,35 @@ impl Builder {
             Parameter::new(id, self.current_function().id, ty, identifier);
         self.map.params.insert(id, param);
         self.current_function().parameters.push(id);
+        if let Some(ast) = ast {
+            self.set_ast(id, ast);
+        }
         id
     }
 
-    pub fn new_typeref(&mut self, kind: TypeRefKind) -> ID {
+    pub fn new_name(
+        &mut self,
+        segments: Vec<String>,
+        ast: Option<Arc<dyn ast::Node>>,
+    ) -> ID {
+        let id = self.new_node(Kind::Name);
+        self.map.names.insert(id, Name { id, segments });
+        if let Some(ast) = ast {
+            self.set_ast(id, ast);
+        }
+        id
+    }
+
+    pub fn new_typeref(
+        &mut self,
+        kind: TypeRefKind,
+        ast: Option<Arc<dyn ast::Node>>,
+    ) -> ID {
         let id = self.new_node(Kind::TypeRef);
         self.map.typerefs.insert(id, TypeRef { id, kind });
+        if let Some(ast) = ast {
+            self.set_ast(id, ast);
+        }
         id
     }
 
@@ -145,7 +214,8 @@ impl Builder {
         let id = self.new_node(Kind::Block);
         let parent = self.scope_stack.top();
         let function = self.current_function.unwrap();
-        let scope = Block::new(id, kind, parent, function, label);
+        let scope =
+            Block::new(id, kind, parent, function, label.map(get_unique_name));
         self.map.blocks.insert(id, scope);
         id
     }
@@ -163,11 +233,18 @@ impl Builder {
         new_scope
     }
 
-    pub fn new_item(&mut self, kind: ItemKind) -> ID {
+    pub fn new_item(
+        &mut self,
+        kind: ItemKind,
+        ast: Option<Arc<dyn ast::Node>>,
+    ) -> ID {
         let id = self.new_node(Kind::Item);
         self.current_scope().items.push(id);
         if let ItemKind::Let(id) = kind {
             self.current_scope().lets.push(id);
+        }
+        if let Some(ast) = ast {
+            self.set_ast(id, ast);
         }
         self.map.items.insert(id, Item { id, kind });
         id
@@ -178,25 +255,49 @@ impl Builder {
         name: String,
         ty: Option<ID>,
         expr: Option<ID>,
+        ast: Option<Arc<dyn ast::Node>>,
     ) -> ID {
         let id = self.new_node(Kind::Let);
-        self.map.lets.insert(id, Let { id, name, ty, expr });
-        self.new_item(ItemKind::Let(id))
+        self.map.lets.insert(
+            id,
+            Let {
+                id,
+                ident: name,
+                ty,
+                expr,
+            },
+        );
+        self.new_item(ItemKind::Let(id), ast)
     }
 
-    pub fn new_expr(&mut self, kind: ExprKind) -> ID {
+    pub fn new_expr(
+        &mut self,
+        kind: ExprKind,
+        ast: Option<Arc<dyn ast::Node>>,
+    ) -> ID {
         let id = self.new_node(Kind::Expr);
         self.map.exprs.insert(id, Expr { id, kind });
+        if let Some(ast) = ast {
+            self.set_ast(id, ast);
+        }
         id
     }
 
-    pub fn new_expr_item(&mut self, kind: ExprKind) -> ID {
-        let expr_id = self.new_expr(kind);
-        let id = self.new_item(ItemKind::Expr(expr_id));
+    pub fn new_expr_item(
+        &mut self,
+        kind: ExprKind,
+        ast: Option<Arc<dyn ast::Node>>,
+    ) -> ID {
+        let expr_id = self.new_expr(kind, ast.clone());
+        let id = self.new_item(ItemKind::Expr(expr_id), ast);
         id
     }
 
-    pub fn new_literal(&mut self, literal: Literal) -> ID {
+    pub fn new_literal(
+        &mut self,
+        literal: Literal,
+        ast: Option<Arc<dyn ast::Node>>,
+    ) -> ID {
         let id = match &literal {
             Literal::Str(s) => {
                 if let Some(&id) = self.string_literals.get(s) {
@@ -216,8 +317,12 @@ impl Builder {
                     id
                 }
             }
+            Literal::Struct(..) => self.new_node(Kind::Literal),
         };
         self.map.literals.insert(id, literal);
+        if let Some(ast) = ast {
+            self.set_ast(id, ast);
+        }
         id
     }
 

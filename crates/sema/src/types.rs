@@ -1,7 +1,7 @@
 use crate::errors::Error;
 use std::{
-    assert_matches::debug_assert_matches, borrow::BorrowMut,
-    collections::HashMap,
+    assert_matches::debug_assert_matches,
+    collections::{HashMap, HashSet},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -32,6 +32,7 @@ pub struct Map {
     marked_ids: HashMap<ID, Vec<ID>>,
     parents: HashMap<ID, ID>,
     constant_exprs: HashMap<ID, ID>,
+    callee_to_callers: HashMap<ID, HashSet<ID>>,
 
     pub(crate) builtins: Builtins,
 
@@ -45,7 +46,7 @@ pub struct Map {
     constants: HashMap<ID, Constant>,
 
     birs: HashMap<ID, bir::ID>,
-    bir_to_id: HashMap<bir::ID, ID>,
+    associated_bir_ids: HashMap<bir::ID, Vec<ID>>,
 }
 
 impl Map {
@@ -82,12 +83,12 @@ impl Map {
         self.parents.get(&id).copied()
     }
 
-    pub fn fn_(&self, id: ID) -> Option<&Function> {
-        self.functions.get(&id)
-    }
-
     pub fn bir(&self, id: ID) -> Option<bir::ID> {
         self.birs.get(&id).copied()
+    }
+
+    pub fn fn_(&self, id: ID) -> Option<&Function> {
+        self.functions.get(&id)
     }
 
     pub fn name(&self, id: ID) -> Option<&Name> {
@@ -111,7 +112,10 @@ impl Map {
     }
 
     pub fn bir_to_id(&self, bir: &bir::ID) -> Option<ID> {
-        self.bir_to_id.get(bir).copied()
+        self.associated_bir_ids
+            .get(bir)
+            .and_then(|ids| ids.first())
+            .copied()
     }
 
     pub fn is_err(&self, id: ID) -> bool {
@@ -119,9 +123,9 @@ impl Map {
     }
 
     pub fn ty(&self, id: ID) -> Option<&Type> {
-        self.ty_id(id).map(|id| {
-            debug_assert_matches!(self.kind(id), Kind::Type);
-            self.types.get(&id).unwrap()
+        self.ty_id(id).and_then(|id| {
+            debug_assert_matches!(self.kind(id), Kind::Type | Kind::Error);
+            self.types.get(&id)
         })
     }
 
@@ -143,6 +147,22 @@ impl Map {
             id = self.constant_exprs[&id];
         }
         self.constants.get(&id)
+    }
+
+    pub(crate) fn add_caller(&mut self, caller: ID, callee: ID) {
+        debug_assert_eq!(self.kind(caller), Kind::Function);
+        debug_assert_eq!(self.kind(callee), Kind::Function);
+        self.callee_to_callers
+            .entry(callee)
+            .or_default()
+            .insert(caller);
+    }
+
+    pub fn num_callers(&self, fn_: ID) -> usize {
+        debug_assert_eq!(self.kind(fn_), Kind::Function);
+        self.callee_to_callers
+            .get(&fn_)
+            .map_or(0, |callers| callers.len())
     }
 
     pub(crate) fn ns_mut(&mut self, id: ID) -> Option<NamespaceHandle<'_>> {
@@ -227,7 +247,7 @@ impl Map {
     pub(crate) fn set_ty(&mut self, id: ID, ty: ID) {
         debug_assert_matches!(self.kind(ty), Kind::Type | Kind::Error);
         self.assigned_type.insert(id, ty);
-        if self.ty(ty).map(Type::is_marker).unwrap_or(false) {
+        if self.ty(ty).map_or(false, Type::is_marker) {
             self.marked_ids.get_mut(&ty).unwrap().push(id);
         }
     }
@@ -252,19 +272,16 @@ impl Map {
 
     pub(crate) fn set_bir(&mut self, id: ID, bir: bir::ID) {
         if let Some(old) = self.birs.insert(id, bir) {
+            let kind = self.kind(id);
             panic!(
-                "warning: overwriting bir::{old:?} with bir::{bir:?} | sema::{id:?}"
+                "overwriting bir::{old:?} with bir::{bir:?} | sema::{id:?} ({kind:?})"
             );
         }
-        self.set_bir_to_id(bir, id);
+        self.associate_bir_with_id(bir, id);
     }
 
-    pub(crate) fn set_bir_to_id(&mut self, bir: bir::ID, id: ID) {
-        if let Some(old) = self.bir_to_id.insert(bir, id) {
-            panic!(
-                "warning: overwriting sema::{old:?} with sema::{id:?} | bir::{bir:?}"
-            );
-        }
+    pub(crate) fn associate_bir_with_id(&mut self, bir: bir::ID, id: ID) {
+        self.associated_bir_ids.entry(bir).or_default().push(id);
     }
 
     pub fn try_get<T: FromMap>(&self, id: ID) -> Option<&T> {
@@ -287,23 +304,27 @@ pub struct Builtins {
 
 impl Map {
     pub fn void_type(&self) -> ID {
-        self.builtins.void_type.expect("no void type builtin?")
+        self.builtins.void_type.expect("no void type builtin set?")
     }
 
     pub fn string_type(&self) -> ID {
-        self.builtins.string_type.expect("no str type builtin?")
+        self.builtins.string_type.expect("no str type builtin set?")
     }
 
     pub fn bool_type(&self) -> ID {
-        self.builtins.bool_type.expect("no bool type builtin?")
+        self.builtins.bool_type.expect("no bool type builtin set?")
     }
 
     pub fn index_type(&self) -> ID {
-        self.builtins.index_type.expect("no index type builtin?")
+        self.builtins
+            .index_type
+            .expect("no index type builtin set?")
     }
 
     pub fn never_type(&self) -> ID {
-        self.builtins.never_type.expect("no never type builtin?")
+        self.builtins
+            .never_type
+            .expect("no never type builtin set?")
     }
 }
 
@@ -329,7 +350,9 @@ impl PrototypeTy {
 impl PrototypeFn {
     pub(crate) fn finish(self, map: &mut Map, params: Vec<ID>) -> ID {
         let fn_ = map.functions.get_mut(&self.id).unwrap();
+        debug_assert_eq!(fn_.prototype, true);
         fn_.params = params;
+        fn_.prototype = false;
         self.id
     }
 }
@@ -426,7 +449,9 @@ impl Type {
                         member_str.push_str(", ...");
                     }
                 }
-                let return_str = fn_ty.return_ty(map).repr(map);
+                let return_str = fn_ty
+                    .return_ty(map)
+                    .map_or("<err>".to_string(), |ty| ty.repr(map));
                 format!("fn ({member_str}) -> {return_str}")
             }
             TypeKind::Marker => "{inferred}".to_string(),
@@ -448,6 +473,10 @@ impl Type {
 
     pub fn is_marker(&self) -> bool {
         matches!(self.kind, TypeKind::Marker)
+    }
+
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self.kind, TypeKind::Aggregate(..))
     }
 }
 
@@ -480,6 +509,7 @@ pub enum TypeKind {
 
 #[derive(Debug, Clone)]
 pub struct AggregateType {
+    pub id: ID,
     pub members: Vec<ID>,
 }
 
@@ -489,6 +519,17 @@ impl AggregateType {
             .iter()
             .position(|&member| member == id)
             .expect("not a member of this struct!")
+    }
+
+    pub fn members<'this, 'map: 'this>(
+        &'this self,
+        map: &'map Map,
+    ) -> impl Iterator<Item = &'map Type> + 'this {
+        self.members.iter().map(|id| map.get(*id))
+    }
+
+    pub fn name<'map>(&self, map: &'map Map) -> Option<&'map Name> {
+        map.try_get(self.id)
     }
 }
 
@@ -500,8 +541,8 @@ pub struct FunctionType {
 }
 
 impl FunctionType {
-    pub fn return_ty<'map>(&self, map: &'map Map) -> &'map Type {
-        map.get(self.return_ty)
+    pub fn return_ty<'map>(&self, map: &'map Map) -> Option<&'map Type> {
+        map.try_get(self.return_ty)
     }
 
     pub fn param_tys<'this, 'map: 'this>(
@@ -544,6 +585,7 @@ pub struct Function {
     pub id: ID,
     pub return_ty: ID,
     pub params: Vec<ID>,
+    pub prototype: bool,
 }
 
 impl Function {
@@ -638,18 +680,11 @@ impl Namespace {
         map.parent(self.id).map(|id| map.ns(id).unwrap())
     }
 
-    pub fn lookup_ty<'map>(
-        &self,
-        map: &'map Map,
-        ident: &str,
-    ) -> Option<&'map Type> {
-        self.lookup(map, ident).and_then(|name| name.ty(map))
-    }
-
     pub fn lookup<'map>(
         &self,
         map: &'map Map,
         ident: &str,
+        check_parents: bool,
     ) -> Option<&'map Name> {
         for id in self.members.iter().rev() {
             let name = map.name(*id).unwrap();
@@ -657,8 +692,10 @@ impl Namespace {
                 return Some(name);
             }
         }
-        if let Some(parent) = self.parent(map) {
-            return parent.lookup(map, ident);
+        if check_parents {
+            if let Some(parent) = self.parent(map) {
+                return parent.lookup(map, ident, true);
+            }
         }
         None
     }
@@ -675,7 +712,7 @@ impl<'map> NamespaceHandle<'map> {
         self.map.namespaces.get_mut(&self.id).unwrap()
     }
 
-    fn add_and_get_idx(v: &mut Vec<ID>, id: ID) -> usize {
+    fn push_and_get_idx(v: &mut Vec<ID>, id: ID) -> usize {
         let idx = v.len();
         v.push(id);
         idx
@@ -718,15 +755,6 @@ impl<'map> NamespaceHandle<'map> {
         self.ns().members.push(id);
     }
 
-    pub(crate) fn new_module(&mut self, ident: Option<&str>) -> ID {
-        let id = self.map.new_node(Kind::Module);
-        if let Some(ident) = ident {
-            self.add_name(id, ident);
-        }
-        self.set_parent_of(id);
-        id
-    }
-
     pub(crate) fn new_ty(&mut self, ident: Option<&str>, kind: TypeKind) -> ID {
         let id = self.map.new_ty(kind);
         if let Some(ident) = ident {
@@ -736,11 +764,16 @@ impl<'map> NamespaceHandle<'map> {
         id
     }
 
+    pub(crate) fn new_node(&mut self, kind: Kind) -> ID {
+        let id = self.map.new_node(kind);
+        self.set_parent_of(id);
+        id
+    }
+
     pub(crate) fn new_ty_member(&mut self, ident: &str, ty: ID) -> ID {
-        let id = self.map.new_node(Kind::TypeMember);
+        let id = self.new_node(Kind::TypeMember);
         self.add_name(id, ident);
         self.map.set_ty(id, ty);
-        self.set_parent_of(id);
         id
     }
 
@@ -756,7 +789,7 @@ impl<'map> NamespaceHandle<'map> {
         bir: bir::ID,
         return_ty: ID,
     ) -> PrototypeFn {
-        let id = self.map.new_node(Kind::Function);
+        let id = self.new_node(Kind::Function);
         self.add_name(id, ident);
         self.map.functions.insert(
             id,
@@ -764,22 +797,16 @@ impl<'map> NamespaceHandle<'map> {
                 id,
                 return_ty,
                 params: Vec::new(),
+                prototype: true,
             },
         );
-        self.set_parent_of(id);
         PrototypeFn { id, bir, return_ty }
-    }
-
-    pub(crate) fn new_node(&mut self, kind: Kind) -> ID {
-        let id = self.map.new_node(kind);
-        self.set_parent_of(id);
-        id
     }
 
     pub(crate) fn new_param(&mut self, ident: &str) -> ID {
         debug_assert_eq!(self.map.kind(self.id), Kind::Function);
         let id = self.new_node(Kind::Param);
-        let idx = Self::add_and_get_idx(&mut self.ns().params, id);
+        let idx = Self::push_and_get_idx(&mut self.ns().params, id);
         self.add_name(id, ident);
         self.set_param(id, idx);
         id
@@ -788,15 +815,21 @@ impl<'map> NamespaceHandle<'map> {
     pub(crate) fn new_var(&mut self, ident: &str) -> ID {
         debug_assert_eq!(self.map.kind(self.id), Kind::Block);
         let id = self.new_node(Kind::Var);
-        let idx = Self::add_and_get_idx(&mut self.ns().vars, id);
+        let idx = Self::push_and_get_idx(&mut self.ns().vars, id);
         self.add_name(id, ident);
         self.set_var(id, idx);
         id
     }
 
     pub(crate) fn new_block(&mut self) -> ID {
-        let id = self.map.new_node(Kind::Block);
-        self.set_parent_of(id);
+        self.new_node(Kind::Block)
+    }
+
+    pub(crate) fn new_module(&mut self, name: Option<&str>) -> ID {
+        let id = self.new_node(Kind::Module);
+        if let Some(name) = name {
+            self.add_name(id, name);
+        }
         id
     }
 }

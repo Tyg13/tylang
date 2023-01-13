@@ -29,6 +29,10 @@ impl Inst {
     pub fn lval(&self) -> ValueRef {
         self.lval.unwrap()
     }
+
+    pub fn block<'f>(&self, f: &'f Function) -> Block {
+        f.block(&self.val.parent.unwrap())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,10 +40,10 @@ pub enum InstKind {
     Var,
     Copy,
     Cast,
-    Offset,
     Load,
     Store,
     Subscript,
+    GetField,
     Call,
     Add,
     Sub,
@@ -55,6 +59,7 @@ pub enum InstKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmpKind {
     Eq,
+    Ne,
     Gt,
     Lt,
     Gte,
@@ -78,11 +83,11 @@ impl InstKind {
             | InstKind::Load
             | InstKind::Store
             | InstKind::Jmp => 1..=1,
-            InstKind::Offset
-            | InstKind::Add
+            InstKind::Add
             | InstKind::Sub
             | InstKind::Mul
             | InstKind::Div
+            | InstKind::GetField
             | InstKind::Cmp { .. } => 2..=2,
             InstKind::Branch => 3..=3,
             InstKind::Call | InstKind::Subscript => 1..=usize::MAX,

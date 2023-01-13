@@ -42,6 +42,101 @@ impl ValueID {
     pub fn as_idx(&self) -> usize {
         (self.0 & !(1 << 31)) as usize
     }
+
+    #[inline]
+    pub(crate) fn inst_mut<'f>(&self, f: &'f mut Function) -> &'f mut Inst {
+        f.inst_mut(*self).unwrap()
+    }
+
+    #[inline]
+    pub fn inst<'f>(&self, ctx: impl Into<Context<'f>>) -> Option<&'f Inst> {
+        debug_assert!(self.is_local());
+        ctx.into().as_fn().inst(self)
+    }
+
+    #[inline]
+    pub fn block<'f>(&self, f: &'f Function) -> Block {
+        debug_assert!(self.is_local());
+        debug_assert_eq!(self.kind(&*f), ValueKind::Block);
+        *f.blocks_by_id.get(self).unwrap()
+    }
+
+    pub fn is_var<'ctx>(&self, ctx: impl Into<Context<'ctx>>) -> bool {
+        self.inst(ctx.into().as_fn())
+            .filter(|inst| inst.kind == InstKind::Var)
+            .is_some()
+    }
+
+    #[inline]
+    fn inner_vals<'f>(&self, ctx: impl Into<Context<'f>>) -> &'f Values {
+        let ctx = ctx.into();
+        match self.is_global() {
+            true => &ctx.as_mod().globals,
+            false => &ctx.as_fn().locals,
+        }
+    }
+
+    #[inline]
+    fn inner<'f>(&self, ctx: impl Into<Context<'f>>) -> &'f Value {
+        self.inner_vals(ctx).get(self)
+    }
+
+    #[inline]
+    pub fn users<'f>(&self, ctx: impl Into<Context<'f>>) -> Users<'f> {
+        self.inner_vals(ctx).users(self)
+    }
+
+    #[inline]
+    pub fn ty<'map, 'f: 'map>(&self, ctx: impl Into<Context<'f>>) -> &'map Ty {
+        let ctx: Context = ctx.into();
+        let ty = self.inner_vals(ctx.clone()).ty(self);
+        ctx.as_mod().types.get(&ty)
+    }
+
+    #[inline]
+    pub fn ident<'f>(&self, ctx: impl Into<Context<'f>>) -> String {
+        self.inner_vals(ctx)
+            .idents
+            .get(self)
+            .cloned()
+            .unwrap_or(format!(".v{}", self.0))
+    }
+
+    #[inline]
+    pub fn kind<'f>(&self, ctx: impl Into<Context<'f>>) -> ValueKind {
+        self.inner(ctx).kind
+    }
+
+    pub fn repr<'f>(&self, ctx: impl Into<Context<'f>>) -> String {
+        let ctx: Context = ctx.into();
+        match self.kind(ctx) {
+            ValueKind::Param | ValueKind::Inst | ValueKind::Block => {
+                self.ident(ctx).to_string()
+            }
+            ValueKind::Constant(kind) => match kind {
+                ConstantKind::Str => {
+                    format!("{:?}", self.str_constant(ctx).to_string())
+                }
+                ConstantKind::Int => self.int_constant(ctx).to_string(),
+            },
+            ValueKind::Function => ctx.as_mod().fn_(self).ident.clone(),
+            ValueKind::Void => "void".to_string(),
+            ValueKind::Undef => "undef".to_string(),
+        }
+    }
+
+    #[inline]
+    pub fn str_constant<'this, 'f: 'this>(
+        &'this self,
+        ctx: impl Into<Context<'f>>,
+    ) -> &'this str {
+        ctx.into().as_mod().str_constant(self)
+    }
+
+    #[inline]
+    pub fn int_constant<'f>(&self, ctx: impl Into<Context<'f>>) -> usize {
+        ctx.into().as_mod().int_constant(self)
+    }
 }
 
 impl std::fmt::Debug for ValueID {
@@ -69,6 +164,13 @@ impl std::fmt::Display for ValueID {
 pub struct ValueRef {
     pub id: ValueID,
     pub parent: Option<ValueID>,
+}
+
+impl std::ops::Deref for ValueRef {
+    type Target = ValueID;
+    fn deref(&self) -> &Self::Target {
+        &self.id
+    }
 }
 
 impl ValueRef {
@@ -99,103 +201,6 @@ impl ValueRef {
             parent: Some(parent),
             ..self
         }
-    }
-
-    #[inline]
-    pub(crate) fn inst_mut<'f>(
-        &self,
-        f: &'f mut Function,
-    ) -> Option<&'f mut Inst> {
-        f.inst_mut(self.id)
-    }
-
-    #[inline]
-    pub fn inst<'f>(&self, ctx: impl Into<Context<'f>>) -> Option<&'f Inst> {
-        debug_assert!(self.is_local());
-        ctx.into().as_fn().inst(self.id)
-    }
-
-    #[inline]
-    pub fn block<'f>(&self, f: &'f Function) -> Block {
-        debug_assert!(self.is_local());
-        debug_assert_eq!(self.kind(&*f), ValueKind::Block);
-        *f.blocks_by_id.get(&self.id).unwrap()
-    }
-
-    pub fn is_var<'ctx>(&self, ctx: impl Into<Context<'ctx>>) -> bool {
-        self.inst(ctx.into().as_fn())
-            .filter(|inst| inst.kind == InstKind::Var)
-            .is_some()
-    }
-
-    #[inline]
-    fn inner_vals<'f>(&self, ctx: impl Into<Context<'f>>) -> &'f Values {
-        let ctx = ctx.into();
-        match self.is_global() {
-            true => &ctx.as_mod().globals,
-            false => &ctx.as_fn().locals,
-        }
-    }
-
-    #[inline]
-    fn inner<'f>(&self, ctx: impl Into<Context<'f>>) -> &'f Value {
-        self.inner_vals(ctx).get(&self.id)
-    }
-
-    #[inline]
-    pub fn users<'f>(&self, ctx: impl Into<Context<'f>>) -> Users<'f> {
-        self.inner_vals(ctx).users(&self.id)
-    }
-
-    #[inline]
-    pub fn ty<'map, 'f: 'map>(&self, ctx: impl Into<Context<'f>>) -> &'map Ty {
-        let ctx: Context = ctx.into();
-        let ty = self.inner_vals(ctx.clone()).ty(&self.id);
-        ctx.as_mod().types.get(&ty)
-    }
-
-    #[inline]
-    pub fn ident<'f>(&self, ctx: impl Into<Context<'f>>) -> String {
-        self.inner_vals(ctx)
-            .idents
-            .get(&self.id)
-            .cloned()
-            .unwrap_or(format!(".v{}", self.id.0))
-    }
-
-    #[inline]
-    pub fn kind<'f>(&self, ctx: impl Into<Context<'f>>) -> ValueKind {
-        self.inner(ctx).kind
-    }
-
-    pub fn repr<'f>(&self, ctx: impl Into<Context<'f>>) -> String {
-        let ctx: Context = ctx.into();
-        match self.kind(ctx) {
-            ValueKind::Param | ValueKind::Inst | ValueKind::Block => {
-                self.ident(ctx).to_string()
-            }
-            ValueKind::Constant(kind) => match kind {
-                ConstantKind::Str => {
-                    format!("{:?}", self.str_constant(ctx).to_string())
-                }
-                ConstantKind::Int => self.int_constant(ctx).to_string(),
-            },
-            ValueKind::Function => ctx.as_mod().fn_(&self.id).ident.clone(),
-            ValueKind::Void => "void".to_string(),
-        }
-    }
-
-    #[inline]
-    pub fn str_constant<'this, 'f: 'this>(
-        &'this self,
-        ctx: impl Into<Context<'f>>,
-    ) -> &'this str {
-        ctx.into().as_mod().str_constant(&self.id)
-    }
-
-    #[inline]
-    pub fn int_constant<'f>(&self, ctx: impl Into<Context<'f>>) -> usize {
-        ctx.into().as_mod().int_constant(&self.id)
     }
 }
 
@@ -234,6 +239,7 @@ pub enum ValueKind {
     Constant(ConstantKind),
     Block,
     Void,
+    Undef,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,9 +288,9 @@ impl Values {
         &mut self,
         kind: ValueKind,
         ty: TyID,
-        ident: Option<&str>,
+        ident: Option<String>,
         global: bool,
-    ) -> ValueRef {
+    ) -> ValueID {
         let id = {
             let idx = self.vals.len();
             if global {
@@ -296,14 +302,19 @@ impl Values {
         self.vals.push(Value { id, kind });
         self.types.insert(id, ty);
         if let Some(ident) = ident {
-            self.idents.insert(id, ident.to_string());
+            self.idents.insert(id, ident);
         }
-        ValueRef::new(id)
+        id
     }
 
     #[inline]
     pub(crate) fn add_user(&mut self, val: ValueID, user: ValueID) {
         self.users.entry(val).or_default().push(user);
+    }
+
+    #[inline]
+    pub(crate) fn remove_user(&mut self, val: ValueID, user: ValueID) {
+        self.users.get_mut(&val).unwrap().retain(|u| *u != user);
     }
 
     #[inline]

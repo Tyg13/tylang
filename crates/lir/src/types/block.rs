@@ -1,9 +1,9 @@
-use utils::vec_graph::{NodeRef, VecGraph};
+use utils::vec_graph::{VecGraph, Vertex};
 
-use crate::types::{Context, Function, Inst, ValueRef};
+use crate::types::{Context, Function, Inst, ValueID, ValueRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Block(pub(crate) NodeRef<BlockData>);
+pub struct Block(pub(crate) Vertex<BlockData>);
 
 impl Block {
     fn data<'this, 'f: 'this>(
@@ -32,13 +32,48 @@ impl Block {
         self.data_mut(f).insts.push(val);
     }
 
-    pub fn val<'f>(&self, ctx: impl Into<Context<'f>>) -> ValueRef {
+    pub(crate) fn remove_inst<'f>(&self, f: &mut Function, id: &ValueID) {
+        let d = self.data_mut(f);
+        d.insts.retain(|i| i.id != *id);
+    }
+
+    pub fn val<'f>(&self, ctx: &'f Function) -> ValueRef {
         self.data(ctx).val
+    }
+
+    pub fn repr<'f>(&self, ctx: &'f Function) -> String {
+        self.val(ctx).repr(ctx)
+    }
+
+    pub fn predecessors<'f>(
+        &self,
+        ctx: impl Into<Context<'f>>,
+    ) -> impl Iterator<Item = Block> + 'f {
+        let f: &Function = ctx.into().as_fn();
+        self.0.predecessors(&f.blocks).iter().map(|&b| Block(b))
     }
 
     pub fn num_predecessors<'f>(&self, ctx: impl Into<Context<'f>>) -> usize {
         let f: &Function = ctx.into().as_fn();
         self.0.in_degree(&f.blocks)
+    }
+
+    pub fn successors<'f>(
+        &self,
+        ctx: impl Into<Context<'f>>,
+    ) -> impl Iterator<Item = Block> + 'f {
+        let f: &Function = ctx.into().as_fn();
+        self.0.successors(&f.blocks).iter().map(|&b| Block(b))
+    }
+
+    pub fn num_successors<'f>(&self, ctx: impl Into<Context<'f>>) -> usize {
+        let f: &Function = ctx.into().as_fn();
+        self.0.out_degree(&f.blocks)
+    }
+
+    pub fn terminator<'f>(&self, f: &'f Function) -> ValueRef {
+        let d = self.data(f);
+        *d.insts.last().unwrap()
     }
 }
 

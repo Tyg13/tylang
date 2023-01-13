@@ -60,23 +60,29 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
         if DEBUG_IDS {
             w!(self, "{:?} ", mod_.id);
         }
-        let walk_inner = |this: &mut Self, m| {
-            visit::walk_modules(this, m);
-            visit::walk_typedefs(this, m);
-            visit::walk_functions(this, m);
-        };
-        match mod_.name {
+        match mod_.ident {
             Some(ref name) => {
-                wln!(self, "mod {name} {{");
+                w!(self, "mod {name} ");
+                if mod_.imported {
+                    w!(self, "(imported) ");
+                }
+                wln!(self, "{{");
                 self.indented(|this| {
-                    walk_inner(this, mod_);
+                    visit::walk_module(this, mod_);
                 });
                 wln!(self, "}}");
             }
             None => {
-                walk_inner(self, mod_);
+                visit::walk_module(self, mod_);
             }
         }
+    }
+
+    fn visit_import(&mut self, import: &Import) {
+        if DEBUG_IDS {
+            w!(self, "{:?} ", import.id);
+        }
+        wln!(self, "import {};", import.name);
     }
 
     fn visit_typedef(&mut self, typedef: &TypeDef) {
@@ -87,7 +93,7 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
         w!(self, " {{");
         let ls = utils::ListSeparator::comma_space();
         for member in typedef.members.iter() {
-            w!(self, "{ls}{}: ", member.identifier);
+            w!(self, "{ls}{}: ", member.ident);
             self.visit_typeref(member.ty(self.map));
         }
         wln!(self, "}}");
@@ -104,8 +110,14 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
             w!(self, "{ls}");
             self.visit_param(param);
         }
+        if fn_.is_var_args {
+            w!(self, ", ...");
+        }
         w!(self, ") -> ");
         self.visit_typeref(fn_.return_type(self.map));
+        if fn_.is_extern {
+            w!(self, " extern");
+        }
         if let Some(body) = fn_.body(self.map) {
             w!(self, " ");
             self.visit_block(body);
@@ -133,7 +145,7 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
                 w!(self, "void");
             }
             Named { name } => {
-                w!(self, "{name}");
+                self.visit_name(self.map.name(name));
             }
             Pointer { pointee } => {
                 w!(self, "*");
@@ -150,18 +162,22 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
             w!(self, "['{label}]: ");
         }
         w!(self, "{{");
-        wln!(self);
-        self.indented(|this| {
-            for item in scope.items(this.map()) {
-                this.visit_item(item);
-                wln!(this, ";");
-            }
-            if let Some(expr) = scope.return_expr(this.map()) {
-                this.visit_expr(expr);
+        if scope.items.is_empty() && scope.return_expr.is_none() {
+            wln!(self, "}}");
+        } else {
+            self.indented(|this| {
                 wln!(this);
-            }
-        });
-        w!(self, "}}");
+                for item in scope.items(this.map()) {
+                    this.visit_item(item);
+                    wln!(this, ";");
+                }
+                if let Some(expr) = scope.return_expr(this.map()) {
+                    this.visit_expr(expr);
+                    wln!(this);
+                }
+            });
+            w!(self, "}}");
+        }
     }
 
     fn visit_item(&mut self, item: &Item) {
@@ -182,7 +198,7 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
         if DEBUG_IDS {
             w!(self, "{:?} ", let_.id);
         }
-        w!(self, "let {}", let_.name);
+        w!(self, "let {}", let_.ident);
         if let Some(ty) = let_.ty(self.map) {
             w!(self, ": ");
             self.visit_typeref(ty);
@@ -206,10 +222,14 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
                 match self.map.lit(id) {
                     Literal::Number(n) => w!(self, "{n}"),
                     Literal::Str(s) => w!(self, "{s:?}"),
+                    Literal::Struct(lit) => {
+                        self.visit_name(self.map.name(&lit.name));
+                        w!(self, "{{}}")
+                    }
                 };
             }
-            ExprKind::NameRef { name } => {
-                w!(self, "{name}");
+            ExprKind::NameRef { id: name } => {
+                self.visit_name(self.map.name(name));
             }
             ExprKind::Cast { val, to } => {
                 let val = self.map.expr(val);
@@ -281,6 +301,10 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
         };
         w!(self, ")");
     }
+
+    fn visit_name(&mut self, n: &Name) {
+        w!(self, "{}", n.segments.join("::"));
+    }
 }
 
 impl Printer<'_> {
@@ -328,13 +352,6 @@ impl Printer<'_> {
                 w!(self, ".");
                 self.visit_expr(rhs);
             }
-            (OpFixity::Infix, OpKind::ScopeAccess) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, "::");
-                self.visit_expr(rhs);
-            }
             (OpFixity::Infix, OpKind::LessThan) => {
                 let lhs = self.map.expr(&op.operands[0]);
                 let rhs = self.map.expr(&op.operands[1]);
@@ -360,14 +377,21 @@ impl Printer<'_> {
                 let lhs = self.map.expr(&op.operands[0]);
                 let rhs = self.map.expr(&op.operands[1]);
                 self.visit_expr(lhs);
-                w!(self, ">=");
+                w!(self, " >= ");
                 self.visit_expr(rhs);
             }
             (OpFixity::Infix, OpKind::Equals) => {
                 let lhs = self.map.expr(&op.operands[0]);
                 let rhs = self.map.expr(&op.operands[1]);
                 self.visit_expr(lhs);
-                w!(self, "==");
+                w!(self, " == ");
+                self.visit_expr(rhs);
+            }
+            (OpFixity::Infix, OpKind::NotEquals) => {
+                let lhs = self.map.expr(&op.operands[0]);
+                let rhs = self.map.expr(&op.operands[1]);
+                self.visit_expr(lhs);
+                w!(self, " != ");
                 self.visit_expr(rhs);
             }
             _ => unreachable!(),

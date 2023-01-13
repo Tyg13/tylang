@@ -10,7 +10,7 @@ pub struct Module {
     pub globals: Values,
     pub types: TyContext,
 
-    pub(crate) void: ValueRef,
+    pub(crate) void: ValueID,
 
     pub(crate) vals_to_fns: HashMap<ValueID, usize>,
     pub(crate) str_constants: HashMap<ValueID, String>,
@@ -35,52 +35,57 @@ impl Module {
         }
     }
 
-    pub fn add_global(
-        &mut self,
+    fn add_global(
+        globals: &mut Values,
         kind: ValueKind,
         ty: TyID,
-        ident: Option<&str>,
-    ) -> ValueRef {
-        self.globals.add_val(kind, ty, ident, true)
+        ident: Option<String>,
+    ) -> ValueID {
+        globals.add_val(kind, ty, ident, true)
     }
 
-    pub fn add_str_constant(&mut self, s: String) -> ValueRef {
-        let ty = self.types.get_str();
-        let val =
-            self.add_global(ValueKind::Constant(ConstantKind::Str), ty, None);
-        self.str_constants.insert(val.id, s);
-        val
+    pub fn add_str_constant(&mut self, s: String) -> ValueID {
+        let id = Self::add_global(
+            &mut self.globals,
+            ValueKind::Constant(ConstantKind::Str),
+            self.types.get_str(),
+            None,
+        );
+        self.str_constants.insert(id, s);
+        id
     }
 
-    pub fn add_int_constant(&mut self, n: usize, ty: TyID) -> ValueRef {
-        let val =
-            self.add_global(ValueKind::Constant(ConstantKind::Int), ty, None);
-        self.int_constants.insert(val.id, n);
-        val
+    pub fn add_int_constant(&mut self, n: usize, ty: TyID) -> ValueID {
+        let id = Self::add_global(
+            &mut self.globals,
+            ValueKind::Constant(ConstantKind::Int),
+            ty,
+            None,
+        );
+        self.int_constants.insert(id, n);
+        id
     }
 
     pub fn add_fn(
         &mut self,
-        name: &str,
-        param_names: &[String],
+        name: String,
+        param_names: Vec<String>,
         ty: TyID,
-        is_var_args: bool,
-    ) -> ValueRef {
-        let val = self.add_global(ValueKind::Function, ty, Some(name));
-        let idx = self.functions.len();
-        let f = Function::new(
-            &self.types,
-            name,
-            param_names,
-            val.id,
+        internal: bool,
+    ) -> ValueID {
+        let id = Self::add_global(
+            &mut self.globals,
+            ValueKind::Function,
             ty,
-            is_var_args,
+            Some(name.clone()),
         );
+        let idx = self.functions.len();
+        let f = Function::new(&self.types, name, param_names, internal, id, ty);
 
         self.functions.push(f);
-        self.vals_to_fns.insert(val.id, idx);
+        self.vals_to_fns.insert(id, idx);
 
-        val
+        id
     }
 
     pub fn fn_(&self, val: &ValueID) -> &Function {

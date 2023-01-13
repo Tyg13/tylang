@@ -1,5 +1,5 @@
-use crate::parser::CompletedMarker;
-use crate::T;
+use crate::CompletedMarker;
+use cst::T;
 
 use super::*;
 
@@ -48,7 +48,17 @@ fn expr_with_precedence(
 fn expr_lhs(parser: &mut Parser) -> Option<CompletedMarker> {
     Some(match parser.advance_to_next_non_trivia() {
         NUMBER | STRING => literal(parser),
-        IDENT => name_ref(parser),
+        IDENT => {
+            let n = parser.start_node();
+            name(parser);
+            if parser.maybe(T!['{']) {
+                parser.expect_token(T!['{']);
+                parser.expect_token(T!['}']);
+                n.complete(parser, STRUCT_LITERAL)
+            } else {
+                n.complete(parser, NAME_REF)
+            }
+        }
         T![if] => if_expr(parser),
         T![loop] => loop_expr(parser),
         T![while] => while_expr(parser),
@@ -79,10 +89,12 @@ fn paren(parser: &mut Parser<'_>) -> CompletedMarker {
     })
 }
 
-fn name_ref(parser: &mut Parser<'_>) -> CompletedMarker {
+pub(crate) fn name_ref(parser: &mut Parser<'_>) -> CompletedMarker {
     parser.node(NAME_REF, |parser| {
         match parser.advance_to_next_non_trivia() {
-            IDENT => parser.token(IDENT),
+            IDENT => {
+                name(parser);
+            }
             kind => parser.unexpected(kind),
         }
     })
@@ -148,7 +160,7 @@ pub(super) fn block_inner(parser: &mut Parser<'_>) {
                 let stmt = previous.precede(parser);
                 parser.expect_token(T![;]);
                 stmt.complete(parser, EXPR_ITEM);
-            } else if next.map(|kind| !parser.maybe(kind)).unwrap_or(true) {
+            } else if next.map_or(true, |kind| !parser.maybe(kind)) {
                 let stmt = previous.precede(parser);
                 stmt.complete(parser, EXPR_ITEM);
             }
@@ -157,6 +169,7 @@ pub(super) fn block_inner(parser: &mut Parser<'_>) {
 
     let mut previous_expr: Option<CompletedMarker> = None;
     loop {
+        parser.step();
         match parser.advance_to_next_non_trivia() {
             T![let] => {
                 finish_previous_expr(parser, previous_expr, None);
@@ -204,9 +217,9 @@ fn infix_op(parser: &mut Parser<'_>) -> Option<(SyntaxKind, usize, usize)> {
         T![|] if parser.at(T![||]) => T![||],
         T![&] if parser.at(T![&&]) => T![&&],
         T![=] if parser.at(T![==]) => T![==],
+        T![!] if parser.at(T![!=]) => T![!=],
         T![<] if parser.at(T![<=]) => T![<=],
         T![>] if parser.at(T![>=]) => T![>=],
-        T![:] if parser.at(T![::]) => T![::],
         kind => kind,
     };
     let (left_binding, right_binding) = infix_binding_power(op_kind)?;
@@ -218,11 +231,11 @@ fn infix_binding_power(kind: SyntaxKind) -> Option<(usize, usize)> {
     match kind {
         T![=]                    => Some((0, 1)),
         T![&&] | T![||]          => Some((1, 2)),
-        T![==] | T![<=] | T![>=] 
+        T![==] | T![!=] | T![<=] | T![>=] 
                | T![<]  | T![>]  => Some((2, 3)),
         T![+]  | T![-]           => Some((3, 4)),
         T![*]  | T![/]           => Some((4, 5)),
-        T![.]  | T![::] | T![as] => Some((5, 6)),
+        T![.]  | T![as]          => Some((5, 6)),
         _ => None,
     }
 }
@@ -304,7 +317,7 @@ fn as_expr(parser: &mut Parser<'_>, lhs: CompletedMarker) -> CompletedMarker {
 
 #[cfg(test)]
 mod tests {
-    use crate::parser::tests::check_tree;
+    use crate::tests::check_tree;
     use expect_test::expect;
 
     #[test]
@@ -321,16 +334,19 @@ mod tests {
                     COLON @ 5..6: ':' 
                     WHITESPACE @ 6..7: ' ' 
                     BASIC_TYPE @ 7..10:
-                      IDENT @ 7..10: 'i32' 
+                      NAME @ 7..10:
+                        IDENT @ 7..10: 'i32' 
                     WHITESPACE @ 10..11: ' ' 
                     EQUALS @ 11..12: '=' 
                     WHITESPACE @ 12..13: ' ' 
                     BIN_EXPR @ 13..16:
                       NAME_REF @ 13..14:
-                        IDENT @ 13..14: 'a' 
+                        NAME @ 13..14:
+                          IDENT @ 13..14: 'a' 
                       PLUS @ 14..15: '+' 
                       NAME_REF @ 15..16:
-                        IDENT @ 15..16: 'b' 
+                        NAME @ 15..16:
+                          IDENT @ 15..16: 'b' 
                     SEMICOLON @ 16..17: ';' "#]],
         );
     }
@@ -349,20 +365,24 @@ mod tests {
                     COLON @ 5..6: ':' 
                     WHITESPACE @ 6..7: ' ' 
                     BASIC_TYPE @ 7..10:
-                      IDENT @ 7..10: 'i32' 
+                      NAME @ 7..10:
+                        IDENT @ 7..10: 'i32' 
                     WHITESPACE @ 10..11: ' ' 
                     EQUALS @ 11..12: '=' 
                     WHITESPACE @ 12..13: ' ' 
                     BIN_EXPR @ 13..18:
                       BIN_EXPR @ 13..16:
                         NAME_REF @ 13..14:
-                          IDENT @ 13..14: 'a' 
+                          NAME @ 13..14:
+                            IDENT @ 13..14: 'a' 
                         PLUS @ 14..15: '+' 
                         NAME_REF @ 15..16:
-                          IDENT @ 15..16: 'b' 
+                          NAME @ 15..16:
+                            IDENT @ 15..16: 'b' 
                       PLUS @ 16..17: '+' 
                       NAME_REF @ 17..18:
-                        IDENT @ 17..18: 'c' 
+                        NAME @ 17..18:
+                          IDENT @ 17..18: 'c' 
                     SEMICOLON @ 18..19: ';' "#]],
         );
     }
@@ -381,20 +401,24 @@ mod tests {
                     COLON @ 5..6: ':' 
                     WHITESPACE @ 6..7: ' ' 
                     BASIC_TYPE @ 7..10:
-                      IDENT @ 7..10: 'i32' 
+                      NAME @ 7..10:
+                        IDENT @ 7..10: 'i32' 
                     WHITESPACE @ 10..11: ' ' 
                     EQUALS @ 11..12: '=' 
                     WHITESPACE @ 12..13: ' ' 
                     BIN_EXPR @ 13..18:
                       NAME_REF @ 13..14:
-                        IDENT @ 13..14: 'a' 
+                        NAME @ 13..14:
+                          IDENT @ 13..14: 'a' 
                       PLUS @ 14..15: '+' 
                       BIN_EXPR @ 15..18:
                         NAME_REF @ 15..16:
-                          IDENT @ 15..16: 'b' 
+                          NAME @ 15..16:
+                            IDENT @ 15..16: 'b' 
                         STAR @ 16..17: '*' 
                         NAME_REF @ 17..18:
-                          IDENT @ 17..18: 'c' 
+                          NAME @ 17..18:
+                            IDENT @ 17..18: 'c' 
                     SEMICOLON @ 18..19: ';' "#]],
         );
     }
@@ -413,7 +437,8 @@ mod tests {
                     COLON @ 5..6: ':' 
                     WHITESPACE @ 6..7: ' ' 
                     BASIC_TYPE @ 7..10:
-                      IDENT @ 7..10: 'i32' 
+                      NAME @ 7..10:
+                        IDENT @ 7..10: 'i32' 
                     WHITESPACE @ 10..11: ' ' 
                     EQUALS @ 11..12: '=' 
                     WHITESPACE @ 12..13: ' ' 
@@ -422,7 +447,8 @@ mod tests {
                       PAREN_EXPR @ 14..17:
                         LEFT_PAREN @ 14..15: '(' 
                         NAME_REF @ 15..16:
-                          IDENT @ 15..16: 'a' 
+                          NAME @ 15..16:
+                            IDENT @ 15..16: 'a' 
                         RIGHT_PAREN @ 16..17: ')' 
                       RIGHT_PAREN @ 17..18: ')' 
                     SEMICOLON @ 18..19: ';' "#]],
@@ -443,7 +469,8 @@ mod tests {
                     COLON @ 5..6: ':' 
                     WHITESPACE @ 6..7: ' ' 
                     BASIC_TYPE @ 7..10:
-                      IDENT @ 7..10: 'i32' 
+                      NAME @ 7..10:
+                        IDENT @ 7..10: 'i32' 
                     WHITESPACE @ 10..11: ' ' 
                     EQUALS @ 11..12: '=' 
                     WHITESPACE @ 12..13: ' ' 
@@ -452,14 +479,17 @@ mod tests {
                         LEFT_PAREN @ 13..14: '(' 
                         BIN_EXPR @ 14..17:
                           NAME_REF @ 14..15:
-                            IDENT @ 14..15: 'a' 
+                            NAME @ 14..15:
+                              IDENT @ 14..15: 'a' 
                           PLUS @ 15..16: '+' 
                           NAME_REF @ 16..17:
-                            IDENT @ 16..17: 'b' 
+                            NAME @ 16..17:
+                              IDENT @ 16..17: 'b' 
                         RIGHT_PAREN @ 17..18: ')' 
                       STAR @ 18..19: '*' 
                       NAME_REF @ 19..20:
-                        IDENT @ 19..20: 'c' 
+                        NAME @ 19..20:
+                          IDENT @ 19..20: 'c' 
                     SEMICOLON @ 20..21: ';' "#]],
         );
     }
@@ -478,7 +508,8 @@ mod tests {
                     COLON @ 5..6: ':' 
                     WHITESPACE @ 6..7: ' ' 
                     BASIC_TYPE @ 7..10:
-                      IDENT @ 7..10: 'i32' 
+                      NAME @ 7..10:
+                        IDENT @ 7..10: 'i32' 
                     WHITESPACE @ 10..11: ' ' 
                     EQUALS @ 11..12: '=' 
                     WHITESPACE @ 12..13: ' ' 
@@ -487,7 +518,8 @@ mod tests {
                       PREFIX_EXPR @ 14..16:
                         DASH @ 14..15: '-' 
                         NAME_REF @ 15..16:
-                          IDENT @ 15..16: 'c' 
+                          NAME @ 15..16:
+                            IDENT @ 15..16: 'c' 
                     SEMICOLON @ 16..17: ';' "#]],
         );
     }
@@ -506,7 +538,8 @@ mod tests {
                     COLON @ 5..6: ':' 
                     WHITESPACE @ 6..7: ' ' 
                     BASIC_TYPE @ 7..10:
-                      IDENT @ 7..10: 'i32' 
+                      NAME @ 7..10:
+                        IDENT @ 7..10: 'i32' 
                     WHITESPACE @ 10..11: ' ' 
                     EQUALS @ 11..12: '=' 
                     WHITESPACE @ 12..13: ' ' 
@@ -516,7 +549,8 @@ mod tests {
                         LEFT_PAREN @ 14..15: '(' 
                         BIN_EXPR @ 15..20:
                           NAME_REF @ 15..16:
-                            IDENT @ 15..16: 'c' 
+                            NAME @ 15..16:
+                              IDENT @ 15..16: 'c' 
                           WHITESPACE @ 16..17: ' ' 
                           STAR @ 17..18: '*' 
                           WHITESPACE @ 18..19: ' ' 
@@ -541,7 +575,8 @@ mod tests {
                     COLON @ 5..6: ':' 
                     WHITESPACE @ 6..7: ' ' 
                     BASIC_TYPE @ 7..10:
-                      IDENT @ 7..10: 'i32' 
+                      NAME @ 7..10:
+                        IDENT @ 7..10: 'i32' 
                     WHITESPACE @ 10..11: ' ' 
                     EQUALS @ 11..12: '=' 
                     WHITESPACE @ 12..13: ' ' 
@@ -549,7 +584,8 @@ mod tests {
                       PREFIX_EXPR @ 13..16:
                         DASH @ 13..14: '-' 
                         NAME_REF @ 14..15:
-                          IDENT @ 14..15: 'c' 
+                          NAME @ 14..15:
+                            IDENT @ 14..15: 'c' 
                         WHITESPACE @ 15..16: ' ' 
                       STAR @ 16..17: '*' 
                       WHITESPACE @ 17..18: ' ' 
@@ -598,7 +634,8 @@ MODULE:
                     BIN_EXPR @ 8..26:
                       BIN_EXPR @ 8..16:
                         NAME_REF @ 8..9:
-                          IDENT @ 8..9: 'a' 
+                          NAME @ 8..9:
+                            IDENT @ 8..9: 'a' 
                         WHITESPACE @ 9..10: ' ' 
                         EQUALS_EQUALS @ 10..12: '==' 
                         WHITESPACE @ 12..13: ' ' 
@@ -609,7 +646,8 @@ MODULE:
                       WHITESPACE @ 18..19: ' ' 
                       BIN_EXPR @ 19..26:
                         NAME_REF @ 19..20:
-                          IDENT @ 19..20: 'b' 
+                          NAME @ 19..20:
+                            IDENT @ 19..20: 'b' 
                         WHITESPACE @ 20..21: ' ' 
                         EQUALS_EQUALS @ 21..23: '==' 
                         WHITESPACE @ 23..24: ' ' 
@@ -635,7 +673,8 @@ MODULE:
                     WHITESPACE @ 7..8: ' ' 
                     CALL_EXPR @ 8..13:
                       NAME_REF @ 8..11:
-                        IDENT @ 8..11: 'foo' 
+                        NAME @ 8..11:
+                          IDENT @ 8..11: 'foo' 
                       LEFT_PAREN @ 11..12: '(' 
                       RIGHT_PAREN @ 12..13: ')' 
                     SEMICOLON @ 13..14: ';' "#]],
@@ -647,38 +686,41 @@ MODULE:
         check_tree(
             "let _ = -foo.bar() + -baz();",
             expect![[r#"
-           MODULE @ 0..28:
-             LET_ITEM @ 0..28:
-               LET_KW @ 0..3: 'let' 
-               WHITESPACE @ 3..4: ' ' 
-               NAME @ 4..5:
-                 IDENT @ 4..5: '_' 
-               WHITESPACE @ 5..6: ' ' 
-               EQUALS @ 6..7: '=' 
-               WHITESPACE @ 7..8: ' ' 
-               BIN_EXPR @ 8..27:
-                 PREFIX_EXPR @ 8..19:
-                   DASH @ 8..9: '-' 
-                   CALL_EXPR @ 9..18:
-                     BIN_EXPR @ 9..16:
-                       NAME_REF @ 9..12:
-                         IDENT @ 9..12: 'foo' 
-                       DOT @ 12..13: '.' 
-                       NAME_REF @ 13..16:
-                         IDENT @ 13..16: 'bar' 
-                     LEFT_PAREN @ 16..17: '(' 
-                     RIGHT_PAREN @ 17..18: ')' 
-                   WHITESPACE @ 18..19: ' ' 
-                 PLUS @ 19..20: '+' 
-                 WHITESPACE @ 20..21: ' ' 
-                 PREFIX_EXPR @ 21..27:
-                   DASH @ 21..22: '-' 
-                   CALL_EXPR @ 22..27:
-                     NAME_REF @ 22..25:
-                       IDENT @ 22..25: 'baz' 
-                     LEFT_PAREN @ 25..26: '(' 
-                     RIGHT_PAREN @ 26..27: ')' 
-               SEMICOLON @ 27..28: ';' "#]],
+                MODULE @ 0..28:
+                  LET_ITEM @ 0..28:
+                    LET_KW @ 0..3: 'let' 
+                    WHITESPACE @ 3..4: ' ' 
+                    NAME @ 4..5:
+                      IDENT @ 4..5: '_' 
+                    WHITESPACE @ 5..6: ' ' 
+                    EQUALS @ 6..7: '=' 
+                    WHITESPACE @ 7..8: ' ' 
+                    BIN_EXPR @ 8..27:
+                      PREFIX_EXPR @ 8..19:
+                        DASH @ 8..9: '-' 
+                        CALL_EXPR @ 9..18:
+                          BIN_EXPR @ 9..16:
+                            NAME_REF @ 9..12:
+                              NAME @ 9..12:
+                                IDENT @ 9..12: 'foo' 
+                            DOT @ 12..13: '.' 
+                            NAME_REF @ 13..16:
+                              NAME @ 13..16:
+                                IDENT @ 13..16: 'bar' 
+                          LEFT_PAREN @ 16..17: '(' 
+                          RIGHT_PAREN @ 17..18: ')' 
+                        WHITESPACE @ 18..19: ' ' 
+                      PLUS @ 19..20: '+' 
+                      WHITESPACE @ 20..21: ' ' 
+                      PREFIX_EXPR @ 21..27:
+                        DASH @ 21..22: '-' 
+                        CALL_EXPR @ 22..27:
+                          NAME_REF @ 22..25:
+                            NAME @ 22..25:
+                              IDENT @ 22..25: 'baz' 
+                          LEFT_PAREN @ 25..26: '(' 
+                          RIGHT_PAREN @ 26..27: ')' 
+                    SEMICOLON @ 27..28: ';' "#]],
         );
     }
     #[test]
@@ -702,7 +744,8 @@ MODULE:
                       AS_KW @ 11..13: 'as' 
                       WHITESPACE @ 13..14: ' ' 
                       BASIC_TYPE @ 14..17:
-                        IDENT @ 14..17: 'i32' 
+                        NAME @ 14..17:
+                          IDENT @ 14..17: 'i32' 
                     SEMICOLON @ 17..18: ';' "#]],
         )
     }

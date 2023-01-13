@@ -189,7 +189,7 @@ impl NodeBuilder {
     }
 
     pub fn finish(mut self) -> Arc<Node> {
-        assert_eq!(self.children.len(), 1);
+        assert_eq!(self.children.len(), 1, "More than one top-level CST node!");
         match self.children.pop().unwrap() {
             Child::Node { node, .. } => node,
             Child::Token { .. } => panic!(),

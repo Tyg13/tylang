@@ -1,17 +1,34 @@
 use crate::hash::hash;
 use crate::{green, SyntaxKind};
 use std::collections::HashMap;
-use std::iter::Peekable;
-use std::str::Chars;
 use std::sync::Arc;
 
 pub type Token = Arc<green::Token>;
 pub type TokenCache = HashMap<(SyntaxKind, u64), Token>;
 
-pub struct Lexer<'source> {
+pub trait TextSource {
+    fn peek_n(&self, start: usize, n: usize) -> &str;
+    fn peek(&self, at: usize) -> Option<char>;
+}
+
+impl TextSource for &str {
+    fn peek_n(&self, start: usize, n: usize) -> &str {
+        &self[start..start + n]
+    }
+
+    fn peek(&self, at: usize) -> Option<char> {
+        self.chars().nth(at)
+    }
+}
+
+pub trait TokenSink {
+    fn token(&mut self, kind: SyntaxKind, text: &str);
+}
+
+pub struct Lexer<'src, 'snk, Src: TextSource, Snk: TokenSink> {
+    source: &'src Src,
+    sink: &'snk mut Snk,
     offset: usize,
-    chars: Peekable<Chars<'source>>,
-    pub(crate) token_cache: TokenCache,
 }
 
 macro_rules! start_ident {
@@ -26,150 +43,169 @@ macro_rules! number {
 
 macro_rules! whitespace {
     () => {
-        ' ' | '\n' | '\r'
+        ' '
     };
 }
 
-impl<'source> Lexer<'source> {
-    pub fn new(input: &'source str) -> Self {
+macro_rules! eol {
+    () => {
+        '\r' | '\n'
+    };
+}
+
+impl<'src, 'snk, Src, Sink> Lexer<'src, 'snk, Src, Sink>
+where
+    Src: TextSource,
+    Sink: TokenSink,
+{
+    pub fn new(source: &'src Src, sink: &'snk mut Sink) -> Self {
         Self {
+            source,
+            sink,
             offset: 0,
-            chars: input.chars().peekable(),
-            token_cache: Default::default(),
         }
     }
 }
 
-impl Lexer<'_> {
-    pub fn lex_one(&mut self) -> Token {
+impl<Src: TextSource, Sink: TokenSink> Lexer<'_, '_, Src, Sink> {
+    pub fn lex_one(&mut self) -> bool {
         let token = match self.peek() {
             Some(token) => token,
-            None => return self.token(SyntaxKind::EOF, "".to_string()),
+            None => {
+                self.token(SyntaxKind::EOF, 0);
+                return false;
+            }
         };
         match token {
-            '(' => self.single(green::SyntaxKind::LEFT_PAREN),
-            ')' => self.single(green::SyntaxKind::RIGHT_PAREN),
-            '{' => self.single(green::SyntaxKind::LEFT_CURLY),
-            '}' => self.single(green::SyntaxKind::RIGHT_CURLY),
-            '[' => self.single(green::SyntaxKind::LEFT_SQUARE),
-            ']' => self.single(green::SyntaxKind::RIGHT_SQUARE),
-            '<' => self.single(green::SyntaxKind::LEFT_ANGLE),
-            '>' => self.single(green::SyntaxKind::RIGHT_ANGLE),
-            ':' => self.single(green::SyntaxKind::COLON),
-            ';' => self.single(green::SyntaxKind::SEMICOLON),
-            '=' => self.single(green::SyntaxKind::EQUALS),
-            ',' => self.single(green::SyntaxKind::COMMA),
-            '-' => self.single(green::SyntaxKind::DASH),
-            '+' => self.single(green::SyntaxKind::PLUS),
-            '*' => self.single(green::SyntaxKind::STAR),
-            '.' => self.single(green::SyntaxKind::DOT),
-            '&' => self.single(green::SyntaxKind::AMPERSAND),
-            '|' => self.single(green::SyntaxKind::BAR),
-            '"' => self.string(),
-            '/' => {
-                self.advance();
-                if self.peek() == Some('/') {
-                    self.comment()
-                } else {
-                    self.token(green::SyntaxKind::SLASH, "/".to_string())
-                }
-            }
             start_ident!() => self.ident_or_keyword(),
             number!() => self.number(),
             whitespace!() => self.whitespace(),
-            _ => self.single(green::SyntaxKind::ERROR),
-        }
+            eol!() => self.eol(token),
+            '(' => self.single(SyntaxKind::LEFT_PAREN),
+            ')' => self.single(SyntaxKind::RIGHT_PAREN),
+            '{' => self.single(SyntaxKind::LEFT_CURLY),
+            '}' => self.single(SyntaxKind::RIGHT_CURLY),
+            '[' => self.single(SyntaxKind::LEFT_SQUARE),
+            ']' => self.single(SyntaxKind::RIGHT_SQUARE),
+            '<' => self.single(SyntaxKind::LEFT_ANGLE),
+            '>' => self.single(SyntaxKind::RIGHT_ANGLE),
+            ':' => self.single(SyntaxKind::COLON),
+            ';' => self.single(SyntaxKind::SEMICOLON),
+            '=' => self.single(SyntaxKind::EQUALS),
+            '!' => self.single(SyntaxKind::BANG),
+            ',' => self.single(SyntaxKind::COMMA),
+            '-' => self.single(SyntaxKind::DASH),
+            '+' => self.single(SyntaxKind::PLUS),
+            '*' => self.single(SyntaxKind::STAR),
+            '.' => self.single(SyntaxKind::DOT),
+            '&' => self.single(SyntaxKind::AMPERSAND),
+            '|' => self.single(SyntaxKind::BAR),
+            '"' => self.string(),
+            '/' => {
+                if self.source.peek_n(self.offset, 2) == "//" {
+                    self.comment();
+                } else {
+                    self.single(SyntaxKind::SLASH);
+                }
+            }
+            _ => self.single(SyntaxKind::ERROR),
+        };
+        true
     }
 
-    fn peek(&mut self) -> Option<char> {
-        self.chars.peek().copied()
+    fn peek(&self) -> Option<char> {
+        self.source.peek(self.offset)
     }
 
-    fn advance(&mut self) -> Option<char> {
-        let c = self.chars.next();
-        self.offset += 1;
-        c
+    fn peek_ahead(&self, n: usize) -> Option<char> {
+        self.source.peek(self.offset + n)
     }
 
-    fn token(&mut self, kind: SyntaxKind, text: String) -> Token {
-        self.token_cache
-            .entry((kind, hash(&text)))
-            .or_insert_with(|| Arc::new(green::Token { kind, text }))
-            .clone()
+    fn token(&mut self, kind: SyntaxKind, n: usize) {
+        let text = self.source.peek_n(self.offset, n);
+        debug_assert_eq!(text.len(), n);
+        self.sink.token(kind, text);
+        self.offset += n;
     }
 
-    fn single(&mut self, kind: green::SyntaxKind) -> Token {
-        let c = self.advance().unwrap();
-        self.token(kind, c.to_string())
+    fn single(&mut self, kind: SyntaxKind) {
+        self.token(kind, 1);
     }
 
-    fn matching_range(&mut self, accept: impl Fn(char) -> bool) -> String {
-        let mut ret = String::new();
-        while let Some(c) = self.peek() {
+    fn matching_range(
+        &mut self,
+        bias: usize,
+        accept: impl Fn(char) -> bool,
+    ) -> usize {
+        let mut len = bias;
+        while let Some(c) = self.peek_ahead(len) {
             if accept(c) {
-                ret.push(self.advance().unwrap());
+                len += 1;
             } else {
                 break;
             }
         }
-        ret
+        len
     }
 
-    fn lex_kind(
-        &mut self,
-        kind: green::SyntaxKind,
-        accept: impl Fn(char) -> bool,
-    ) -> Token {
-        let text = self.matching_range(accept);
-        self.token(kind, text)
+    fn lex_kind(&mut self, kind: SyntaxKind, accept: impl Fn(char) -> bool) {
+        let len = self.matching_range(0, accept);
+        self.token(kind, len);
     }
 
-    fn ident_or_keyword(&mut self) -> Token {
-        let start = self.matching_range(is_start_ident);
-        let end = self.matching_range(is_ident);
-        let text = format!("{start}{end}");
-        let kind = match text.as_str() {
-            "mod" => SyntaxKind::MOD_KW,
-            "type" => SyntaxKind::TYPE_KW,
-            "fn" => SyntaxKind::FN_KW,
-            "let" => SyntaxKind::LET_KW,
-            "return" => SyntaxKind::RETURN_KW,
-            "if" => SyntaxKind::IF_KW,
-            "else" => SyntaxKind::ELSE_KW,
-            "loop" => SyntaxKind::LOOP_KW,
-            "while" => SyntaxKind::WHILE_KW,
+    fn ident_or_keyword(&mut self) {
+        let start = self.matching_range(0, is_start_ident);
+        let len = self.matching_range(start, is_ident);
+        let kind = match self.source.peek_n(self.offset, len) {
+            "as" => SyntaxKind::AS_KW,
             "break" => SyntaxKind::BREAK_KW,
             "continue" => SyntaxKind::CONTINUE_KW,
-            "as" => SyntaxKind::AS_KW,
+            "else" => SyntaxKind::ELSE_KW,
+            "extern" => SyntaxKind::EXTERN_KW,
+            "fn" => SyntaxKind::FN_KW,
+            "if" => SyntaxKind::IF_KW,
+            "import" => SyntaxKind::IMPORT_KW,
+            "let" => SyntaxKind::LET_KW,
+            "loop" => SyntaxKind::LOOP_KW,
+            "mod" => SyntaxKind::MOD_KW,
+            "return" => SyntaxKind::RETURN_KW,
+            "type" => SyntaxKind::TYPE_KW,
+            "while" => SyntaxKind::WHILE_KW,
             _ => SyntaxKind::IDENT,
         };
-        self.token(kind, text)
+        self.token(kind, len);
     }
 
-    fn whitespace(&mut self) -> Token {
-        self.lex_kind(green::SyntaxKind::WHITESPACE, is_whitespace)
+    fn whitespace(&mut self) {
+        self.lex_kind(SyntaxKind::WHITESPACE, is_whitespace);
     }
 
-    fn number(&mut self) -> Token {
-        self.lex_kind(green::SyntaxKind::NUMBER, is_number)
+    fn eol(&mut self, c: char) {
+        if c == '\r' && self.peek_ahead(1) == Some('\n') {
+            self.token(SyntaxKind::EOL, 2);
+            return;
+        }
+        self.token(SyntaxKind::EOL, 1);
     }
 
-    fn string(&mut self) -> Token {
-        let start = self.advance().unwrap();
-        let mut end = self.matching_range(|c| c != '"');
-        let kind = if let Some('"') = self.peek() {
-            end.push(self.advance().unwrap());
+    fn number(&mut self) {
+        self.lex_kind(SyntaxKind::NUMBER, is_number);
+    }
+
+    fn string(&mut self) {
+        let mut len = self.matching_range(1, |c| c != '"');
+        let kind = if self.peek_ahead(len) == Some('"') {
+            len += 1;
             SyntaxKind::STRING
         } else {
             SyntaxKind::ERROR
         };
-        self.token(kind, format!("{start}{end}"))
+        self.token(kind, len);
     }
 
-    fn comment(&mut self) -> Token {
-        self.advance().unwrap();
-        let contents = self.matching_range(|c| c != '\n');
-        self.token(SyntaxKind::COMMENT, format!("//{contents}"))
+    fn comment(&mut self) {
+        let len = self.matching_range(2, |c| c != '\n');
+        self.token(SyntaxKind::COMMENT, len);
     }
 }
 
@@ -189,14 +225,47 @@ fn is_number(c: char) -> bool {
     matches!(c, number!())
 }
 
+pub struct Tokens {
+    pub stream: Vec<Token>,
+    pub cache: TokenCache,
+}
+
+impl Tokens {
+    pub fn new() -> Self {
+        Self {
+            stream: Default::default(),
+            cache: TokenCache::new(),
+        }
+    }
+}
+
+impl TokenSink for Tokens {
+    fn token(&mut self, kind: SyntaxKind, text: &str) {
+        let t = self.cache.entry((kind, hash(text))).or_insert_with(|| {
+            Arc::new(green::Token {
+                kind,
+                text: text.to_string(),
+            })
+        });
+        self.stream.push(t.clone());
+    }
+}
+
+pub fn lex(source: &str) -> Tokens {
+    let mut tokens = Tokens::new();
+    let mut lexer = Lexer::new(&source, &mut tokens);
+    while lexer.lex_one() {}
+    tokens
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use green::SyntaxKind::*;
+    use SyntaxKind::*;
 
     macro_rules! assert_token {
-        ($lexer:expr, $kind:expr, $text:expr) => {{
-            let token = $lexer.lex_one();
+        ($tokens:expr, $kind:expr, $text:expr) => {{
+            let token = $tokens.next().unwrap();
             assert_eq!(token.kind, $kind);
             assert_eq!(token.text, $text);
             token
@@ -204,108 +273,137 @@ mod tests {
     }
 
     macro_rules! assert_done {
-        ($lexer:expr) => {
-            let token = $lexer.lex_one();
+        ($tokens:expr) => {
+            let token = $tokens.next().unwrap();
             assert_eq!(token.kind, EOF);
+            assert_eq!($tokens.next(), None);
         };
+    }
+
+    fn check(s: &'static str, ts: &[(SyntaxKind, &'static str)]) {
+        let mut tokens = Tokens::new();
+        {
+            let mut lexer = Lexer::new(&s, &mut tokens);
+            while lexer.lex_one() {}
+        }
+        let mut stream = tokens.stream.iter();
+        for (kind, text) in ts {
+            assert_token!(stream, *kind, *text);
+        }
+        assert_done!(stream);
     }
 
     #[test]
     fn ident() {
-        let mut lexer = Lexer::new("foo");
-        assert_token!(lexer, IDENT, "foo");
-        assert_done!(lexer);
+        check("foo", &[(IDENT, "foo")]);
     }
 
     #[test]
-    fn whitespace() {
-        let mut lexer = Lexer::new("  ");
-        assert_token!(lexer, WHITESPACE, "  ");
-        assert_done!(lexer);
+    fn whitespace_and_eol() {
+        check("  ", &[(WHITESPACE, "  ")]);
+        check("\n ", &[(EOL, "\n"), (WHITESPACE, " ")]);
+        check("\n  \n", &[(EOL, "\n"), (WHITESPACE, "  "), (EOL, "\n")]);
+        check(
+            "\r\n   \n",
+            &[(EOL, "\r\n"), (WHITESPACE, "   "), (EOL, "\n")],
+        );
     }
 
     #[test]
     fn number() {
-        let mut lexer = Lexer::new("123");
-        assert_token!(lexer, NUMBER, "123");
+        check("123", &[(NUMBER, "123")]);
+        check("3", &[(NUMBER, "3")]);
     }
 
     #[test]
     fn string() {
-        let mut lexer = Lexer::new("\"foobar\"\"bazbaz\"");
-        assert_token!(lexer, STRING, "\"foobar\"");
-        assert_token!(lexer, STRING, "\"bazbaz\"");
-        assert_done!(lexer);
+        check(r#""foo""#, &[(STRING, "\"foo\"")]);
+        check(r#""foo"#, &[(ERROR, "\"foo")]);
+        check(
+            r#""foobar""bazbaz""#,
+            &[(STRING, "\"foobar\""), (STRING, "\"bazbaz\"")],
+        );
     }
 
     #[test]
     fn none() {
-        let mut lexer = Lexer::new("");
-        assert_done!(lexer);
+        check("", &[]);
     }
 
     #[test]
     fn interning() {
-        let mut lexer = Lexer::new("foo foo");
-        let foo_1 = assert_token!(lexer, IDENT, "foo");
-        let _ = assert_token!(lexer, WHITESPACE, " ");
-        let foo_2 = assert_token!(lexer, IDENT, "foo");
+        let mut tokens = Tokens::new();
+        let mut lexer = Lexer::new(&"foo foo", &mut tokens);
+        while lexer.lex_one() {}
+        let mut stream = tokens.stream.iter();
+        let foo_1 = assert_token!(stream, IDENT, "foo");
+        let _ = assert_token!(stream, WHITESPACE, " ");
+        let foo_2 = assert_token!(stream, IDENT, "foo");
         assert!(Arc::ptr_eq(&foo_1, &foo_2));
     }
 
     #[test]
     fn keywords() {
-        let mut lexer = Lexer::new(
-            "mod type let fn return if else loop while break continue as",
-        );
-        assert_token!(lexer, MOD_KW, "mod");
-        assert_token!(lexer, WHITESPACE, " ");
-        assert_token!(lexer, TYPE_KW, "type");
-        assert_token!(lexer, WHITESPACE, " ");
-        assert_token!(lexer, LET_KW, "let");
-        assert_token!(lexer, WHITESPACE, " ");
-        assert_token!(lexer, FN_KW, "fn");
-        assert_token!(lexer, WHITESPACE, " ");
-        assert_token!(lexer, RETURN_KW, "return");
-        assert_token!(lexer, WHITESPACE, " ");
-        assert_token!(lexer, IF_KW, "if");
-        assert_token!(lexer, WHITESPACE, " ");
-        assert_token!(lexer, ELSE_KW, "else");
-        assert_token!(lexer, WHITESPACE, " ");
-        assert_token!(lexer, LOOP_KW, "loop");
-        assert_token!(lexer, WHITESPACE, " ");
-        assert_token!(lexer, WHILE_KW, "while");
-        assert_token!(lexer, WHITESPACE, " ");
-        assert_token!(lexer, BREAK_KW, "break");
-        assert_token!(lexer, WHITESPACE, " ");
-        assert_token!(lexer, CONTINUE_KW, "continue");
-        assert_token!(lexer, WHITESPACE, " ");
-        assert_token!(lexer, AS_KW, "as");
-        assert_done!(lexer);
+        check(
+            "mod import type let fn return if else loop while break continue as extern",
+            &[
+                (MOD_KW, "mod"),
+                (WHITESPACE, " "),
+                (IMPORT_KW, "import"),
+                (WHITESPACE, " "),
+                (TYPE_KW, "type"),
+                (WHITESPACE, " "),
+                (LET_KW, "let"),
+                (WHITESPACE, " "),
+                (FN_KW, "fn"),
+                (WHITESPACE, " "),
+                (RETURN_KW, "return"),
+                (WHITESPACE, " "),
+                (IF_KW, "if"),
+                (WHITESPACE, " "),
+                (ELSE_KW, "else"),
+                (WHITESPACE, " "),
+                (LOOP_KW, "loop"),
+                (WHITESPACE, " "),
+                (WHILE_KW, "while"),
+                (WHITESPACE, " "),
+                (BREAK_KW, "break"),
+                (WHITESPACE, " "),
+                (CONTINUE_KW, "continue"),
+                (WHITESPACE, " "),
+                (AS_KW, "as"),
+                (WHITESPACE, " "),
+                (EXTERN_KW, "extern"),
+            ],
+        )
     }
 
     #[test]
     fn single_tokens() {
-        let mut lexer = Lexer::new("(){}[]<>:;=,-+*/.&|");
-        assert_token!(lexer, LEFT_PAREN, "(");
-        assert_token!(lexer, RIGHT_PAREN, ")");
-        assert_token!(lexer, LEFT_CURLY, "{");
-        assert_token!(lexer, RIGHT_CURLY, "}");
-        assert_token!(lexer, LEFT_SQUARE, "[");
-        assert_token!(lexer, RIGHT_SQUARE, "]");
-        assert_token!(lexer, LEFT_ANGLE, "<");
-        assert_token!(lexer, RIGHT_ANGLE, ">");
-        assert_token!(lexer, COLON, ":");
-        assert_token!(lexer, SEMICOLON, ";");
-        assert_token!(lexer, EQUALS, "=");
-        assert_token!(lexer, COMMA, ",");
-        assert_token!(lexer, DASH, "-");
-        assert_token!(lexer, PLUS, "+");
-        assert_token!(lexer, STAR, "*");
-        assert_token!(lexer, SLASH, "/");
-        assert_token!(lexer, DOT, ".");
-        assert_token!(lexer, AMPERSAND, "&");
-        assert_token!(lexer, BAR, "|");
-        assert_done!(lexer);
+        check(
+            "(){}[]<>:;=!,-+*/.&|",
+            &[
+                (LEFT_PAREN, "("),
+                (RIGHT_PAREN, ")"),
+                (LEFT_CURLY, "{"),
+                (RIGHT_CURLY, "}"),
+                (LEFT_SQUARE, "["),
+                (RIGHT_SQUARE, "]"),
+                (LEFT_ANGLE, "<"),
+                (RIGHT_ANGLE, ">"),
+                (COLON, ":"),
+                (SEMICOLON, ";"),
+                (EQUALS, "="),
+                (BANG, "!"),
+                (COMMA, ","),
+                (DASH, "-"),
+                (PLUS, "+"),
+                (STAR, "*"),
+                (SLASH, "/"),
+                (DOT, "."),
+                (AMPERSAND, "&"),
+                (BAR, "|"),
+            ],
+        );
     }
 }
