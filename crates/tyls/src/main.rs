@@ -192,12 +192,10 @@ fn main() {
 
     let message_queue: ArrayQueue<Message> = ArrayQueue::new(10);
     crossbeam_utils::thread::scope(|s| {
-        let sender_thread = s.spawn(|_| {
-            loop {
-                while let Some(message) = message_queue.pop() {
-                    log::debug!("{message:?}");
-                    conn.sender.send(message).unwrap();
-                }
+        let sender_thread = s.spawn(|_| loop {
+            while let Some(message) = message_queue.pop() {
+                log::debug!("{message:?}");
+                conn.sender.send(message).unwrap();
             }
         });
         let receiver_thread = s.spawn(|_| {

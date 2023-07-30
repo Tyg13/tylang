@@ -99,22 +99,20 @@ fn type_(parser: &mut Parser<'_>) {
 fn param_list(parser: &mut Parser<'_>) {
     parser.node(PARAM_LIST, |parser| {
         parser.expect_token(T!['(']);
-        parser.with_follow_set(&[T![')']], |parser| {
-            loop {
-                parser.add_to_follow_set(&[T![:], T![,]]);
-                match parser.advance_to_next_non_trivia() {
-                    T![')'] | EOF => break,
-                    T![.] => {
-                        parser.node(VA_PARAM, |parser| {
-                            parser.expect_token(T![...]);
-                        });
-                        break;
-                    }
-                    _ => {
-                        param(parser);
-                        if parser.maybe(T![,]) {
-                            parser.token(T![,]);
-                        }
+        parser.with_follow_set(&[T![')']], |parser| loop {
+            parser.add_to_follow_set(&[T![:], T![,]]);
+            match parser.advance_to_next_non_trivia() {
+                T![')'] | EOF => break,
+                T![.] => {
+                    parser.node(VA_PARAM, |parser| {
+                        parser.expect_token(T![...]);
+                    });
+                    break;
+                }
+                _ => {
+                    param(parser);
+                    if parser.maybe(T![,]) {
+                        parser.token(T![,]);
                     }
                 }
             }

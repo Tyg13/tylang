@@ -42,7 +42,11 @@ impl SourceBuilder {
     }
     pub fn build(self) -> Source {
         let file = self.file.map_or("<err>".to_string(), |s| {
-            if s == "-" { "<stdin>".to_string() } else { s }
+            if s == "-" {
+                "<stdin>".to_string()
+            } else {
+                s
+            }
         });
         let chars: Vec<char> =
             self.source.unwrap_or_default().chars().collect();
@@ -250,9 +254,7 @@ mod tests {
         let s = SourceBuilder::new().source("foo\nb\n  baz\n").build();
         assert_eq!(
             s.chars,
-            vec![
-                'f', 'o', 'o', '\n', 'b', '\n', ' ', ' ', 'b', 'a', 'z', '\n'
-            ]
+            vec!['f', 'o', 'o', '\n', 'b', '\n', ' ', ' ', 'b', 'a', 'z', '\n']
         );
         assert_eq!(s.line_ends, vec![3, 5, 11]);
     }

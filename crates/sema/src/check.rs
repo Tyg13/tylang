@@ -142,9 +142,9 @@ impl Checker<'_> {
             self.map.kind(return_ty),
             Kind::Type | Kind::Error
         );
-        debug_assert!(
-            param_types.iter().all(|id| self.map.ty_id(*id).is_some())
-        );
+        debug_assert!(param_types
+            .iter()
+            .all(|id| self.map.ty_id(*id).is_some()));
 
         let ty = {
             let return_ty = self.map.ty_id(return_ty).unwrap_or(return_ty);
@@ -222,11 +222,9 @@ impl Checker<'_> {
     }
 
     fn finish_ty_proto(&mut self, proto: PrototypeTy, members: Vec<ID>) -> ID {
-        debug_assert!(
-            members
-                .iter()
-                .all(|id| self.map.kind(*id) == Kind::TypeMember)
-        );
+        debug_assert!(members
+            .iter()
+            .all(|id| self.map.kind(*id) == Kind::TypeMember));
         let id = proto.id;
         proto.finish(
             &mut self.map,
