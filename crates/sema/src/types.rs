@@ -1,8 +1,6 @@
 use crate::errors::Error;
-use std::{
-    assert_matches::debug_assert_matches,
-    collections::{HashMap, HashSet},
-};
+use assert_matches::debug_assert_matches;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ID(pub(crate) usize);

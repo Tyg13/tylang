@@ -2,7 +2,7 @@ use crate::{
     errors::{Error, ErrorKind},
     types::*,
 };
-use std::assert_matches::debug_assert_matches;
+use assert_matches::debug_assert_matches;
 
 struct Checker<'bir> {
     map: Map,

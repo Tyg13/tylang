@@ -1,5 +1,3 @@
-#![feature(assert_matches)]
-
 use clap::Parser;
 use std::fs;
 use std::sync::Arc;

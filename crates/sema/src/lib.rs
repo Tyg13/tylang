@@ -1,4 +1,3 @@
-#![feature(assert_matches)]
 /// Why 'sema'?
 ///
 /// The point of this module is to analyze beyond the syntax -- in BIR, we

@@ -1,4 +1,4 @@
-use std::assert_matches::debug_assert_matches;
+use assert_matches::debug_assert_matches;
 use std::collections::HashMap;
 
 use crate::types::*;

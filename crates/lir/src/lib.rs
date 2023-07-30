@@ -1,5 +1,3 @@
-#![feature(assert_matches)]
-
 mod builder;
 pub use builder::Builder;
 
