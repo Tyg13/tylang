@@ -158,9 +158,20 @@ fn module_inner(builder: &mut Builder, mod_: &Arc<ast::Module>) {
             builder.current_function().is_extern = true;
         }
 
-        if let Some(body) = fn_.block() {
-            builder.current_function().body =
-                Some(block_(builder, BlockKind::Function, None, &body));
+        if let Some(body) = fn_.body() {
+            if let Some(block) = body.block() {
+                builder.current_function().body =
+                    Some(block_(builder, BlockKind::Function, None, &block));
+            } else {
+                builder.current_function().body = Some(builder.in_new_scope(
+                    None,
+                    BlockKind::Function,
+                    |builder| {
+                        builder.current_scope().return_expr =
+                            Some(expr_(builder, &body));
+                    },
+                ));
+            }
         }
     }
 }
@@ -182,8 +193,8 @@ fn name(builder: &mut Builder, name: &Arc<ast::Name>) -> ID {
     let mut curr = Some(name.clone());
     while let Some(ref name) = curr {
         match name.kind() {
-            ast::SyntaxKind::DOTTED_NAME => {
-                let name = name.dotted_name().unwrap();
+            ast::SyntaxKind::SCOPED_NAME => {
+                let name = name.scoped_name().unwrap();
                 segments.push(name.head().unwrap().text().to_string());
                 curr = name.tail();
             }
@@ -300,42 +311,56 @@ fn name_ref(builder: &mut Builder, ref_: &Arc<ast::NameRef>) -> ExprKind {
 }
 
 fn prefix_expr(builder: &mut Builder, expr: &Arc<ast::PrefixExpr>) -> ExprKind {
-    let kind = match expr.op().unwrap().text() {
-        "+" => OpKind::Plus,
-        "-" => OpKind::Minus,
-        _ => unreachable!(),
-    };
-    let operand = expr_(builder, &expr.operand().unwrap());
-    ExprKind::Op(Op {
-        fixity: OpFixity::Prefix,
-        kind,
-        operands: vec![operand],
+    ExprKind::Op(Op::Prefix {
+        kind: match expr.op().unwrap().text() {
+            "+" => PrefixOpKind::Plus,
+            "-" => PrefixOpKind::Negate,
+            "*" => PrefixOpKind::Deref,
+            _ => unreachable!(),
+        },
+        arg: expr_(builder, &expr.operand().unwrap()),
     })
 }
 
 fn binary_expr(builder: &mut Builder, expr: &Arc<ast::BinExpr>) -> ExprKind {
     let kind = match expr.op().unwrap().text() {
-        "+" => OpKind::Plus,
-        "-" => OpKind::Minus,
-        "*" => OpKind::Multiply,
-        "/" => OpKind::Divide,
-        "." => OpKind::FieldAccess,
-        "==" => OpKind::Equals,
-        "!=" => OpKind::NotEquals,
-        ">" => OpKind::GreaterThan,
-        ">=" => OpKind::GreaterThanEquals,
-        "<" => OpKind::LessThan,
-        "<=" => OpKind::LessThanEquals,
-        "=" => OpKind::Assignment,
+        "+" => BinaryOpKind::Add,
+        "-" => BinaryOpKind::Sub,
+        "*" => BinaryOpKind::Mul,
+        "." => BinaryOpKind::DotAccess,
+        "->" => BinaryOpKind::ArrowAccess,
+        "==" => BinaryOpKind::Equals,
+        "!=" => BinaryOpKind::NotEquals,
+        ">" => BinaryOpKind::GreaterThan,
+        ">=" => BinaryOpKind::GreaterThanEquals,
+        "<" => BinaryOpKind::LessThan,
+        "<=" => BinaryOpKind::LessThanEquals,
+        "=" => BinaryOpKind::Assign,
         kind => panic!("unrecognized op: {kind}"),
     };
     let lhs = expr_(builder, &expr.lhs().unwrap());
     let rhs = expr_(builder, &expr.rhs().unwrap());
-    ExprKind::Op(Op {
-        fixity: OpFixity::Infix,
-        kind,
-        operands: vec![lhs, rhs],
-    })
+
+    // Kind of ugly hack to transform
+    //   (*expr).field   -->   (expr->field)
+    //
+    // This is intended as a kind of canonicalization to make lowering
+    // easier (since this means we can always lower Derefs to loads).
+    if kind == BinaryOpKind::DotAccess {
+        if let Some(op) = builder.map.expr(&lhs).op() {
+            if op.is_prefix() && op.prefix_kind() == PrefixOpKind::Deref {
+                let new_lhs = op.prefix_arg();
+                builder.unlink_node(lhs);
+                return ExprKind::Op(Op::Binary {
+                    kind: BinaryOpKind::ArrowAccess,
+                    lhs: new_lhs,
+                    rhs,
+                });
+            }
+        }
+    }
+
+    ExprKind::Op(Op::Binary { kind, lhs, rhs })
 }
 
 fn group_expr(builder: &mut Builder, group: &Arc<ast::Group>) -> ID {
@@ -350,12 +375,14 @@ fn block_expr(builder: &mut Builder, block: &Arc<ast::Block>) -> ExprKind {
 }
 
 fn call_expr(builder: &mut Builder, expr: &Arc<ast::CallExpr>) -> ExprKind {
-    let receiver = expr_(builder, &expr.receiver().unwrap());
-    let mut operands = Vec::new();
-    for arg in expr.arguments().by_ref() {
-        operands.push(expr_(builder, &arg));
+    ExprKind::Call {
+        receiver: expr_(builder, &expr.receiver().unwrap()),
+        operands: expr
+            .arguments()
+            .by_ref()
+            .map(|arg| expr_(builder, &arg))
+            .collect(),
     }
-    ExprKind::Call { receiver, operands }
 }
 
 fn return_expr(builder: &mut Builder, ret: &Arc<ast::Return>) -> ExprKind {
@@ -372,19 +399,17 @@ fn index_expr(builder: &mut Builder, expr: &Arc<ast::IndexExpr>) -> ExprKind {
 }
 
 fn if_expr(builder: &mut Builder, expr: &Arc<ast::IfExpr>) -> ExprKind {
-    let condition = expr_(builder, &expr.condition().unwrap());
-    let left = block_(builder, BlockKind::Expr, None, &expr.then().unwrap());
-    let (kind, right) = if let Some(alt) = expr.alternate() {
-        let right = block_(builder, BlockKind::Expr, None, &alt);
-        (BranchKind::IfElse, Some(right))
-    } else {
-        (BranchKind::If, None)
-    };
     ExprKind::Branch {
-        condition,
-        kind,
-        left,
-        right,
+        condition: expr_(builder, &expr.condition().unwrap()),
+        kind: if expr.alternate().is_some() {
+            BranchKind::IfElse
+        } else {
+            BranchKind::If
+        },
+        left: block_(builder, BlockKind::Expr, None, &expr.then().unwrap()),
+        right: expr
+            .alternate()
+            .map(|alt| block_(builder, BlockKind::Expr, None, &alt)),
     }
 }
 
@@ -404,39 +429,43 @@ fn loop_expr(builder: &mut Builder, loop_: &Arc<ast::LoopExpr>) -> ExprKind {
 }
 
 fn while_expr(builder: &mut Builder, while_: &Arc<ast::WhileExpr>) -> ExprKind {
+    let body = builder.in_new_scope(
+        Some("while.latch".to_string()),
+        BlockKind::Loop,
+        |builder| {
+            let condition = expr_(builder, &while_.condition().unwrap());
+
+            let body = block_(
+                builder,
+                BlockKind::Loop,
+                Some("while.body".to_string()),
+                &while_.body().unwrap(),
+            );
+
+            let exit_block =
+                builder.in_new_scope(None, BlockKind::Expr, |builder| {
+                    builder.new_expr_item(
+                        ExprKind::Break {
+                            label: builder.last_loop_label(),
+                        },
+                        None,
+                    );
+                });
+
+            builder.new_expr_item(
+                ExprKind::Branch {
+                    condition,
+                    kind: BranchKind::IfElse,
+                    left: body,
+                    right: Some(exit_block),
+                },
+                Some(while_.clone()),
+            );
+        },
+    );
     ExprKind::Loop {
         kind: LoopKind::While,
-        body: builder.in_new_scope(
-            Some("while.latch".to_string()),
-            BlockKind::Loop,
-            |builder| {
-                let condition = expr_(builder, &while_.condition().unwrap());
-                let body = block_(
-                    builder,
-                    BlockKind::Loop,
-                    Some("while.body".to_string()),
-                    &while_.body().unwrap(),
-                );
-                let exit_block =
-                    builder.in_new_scope(None, BlockKind::Expr, |builder| {
-                        builder.new_expr_item(
-                            ExprKind::Break {
-                                label: builder.last_loop_label(),
-                            },
-                            None,
-                        );
-                    });
-                builder.new_expr_item(
-                    ExprKind::Branch {
-                        condition,
-                        kind: BranchKind::IfElse,
-                        left: body,
-                        right: Some(exit_block),
-                    },
-                    Some(while_.clone()),
-                );
-            },
-        ),
+        body,
     }
 }
 

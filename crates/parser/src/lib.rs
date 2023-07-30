@@ -17,6 +17,7 @@ pub use types::*;
 pub trait TokenSource {
     fn kind_at(&self, index: usize) -> SyntaxKind;
     fn text_at(&self, index: usize) -> &str;
+    fn size_hint(&self) -> usize;
 }
 
 pub trait EventSink {

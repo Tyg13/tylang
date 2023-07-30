@@ -8,11 +8,12 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> Result<()> {
     if std::env::args().count() < 3 {
-        eprintln!("USAGE: <compiler> <run-dir>");
+        eprintln!("USAGE: <compiler> <run-dir> [<args>...]");
         std::process::exit(1);
     }
     let compiler_binary = std::env::args().nth(1).unwrap();
     let run_dir = std::env::args().nth(2).unwrap();
+    let args: Vec<_> = std::env::args().skip(3).collect();
 
     let pattern = PathBuf::from(run_dir).join("*.ty");
 
@@ -22,7 +23,7 @@ fn main() -> Result<()> {
         let ty_file = ty_file?;
 
         num_tests += 1;
-        match run_test(&ty_file, &compiler_binary)? {
+        match run_test(&ty_file, &compiler_binary, &args)? {
             TestStatus::Pass => {
                 num_passes += 1;
             }
@@ -58,7 +59,11 @@ enum TestStatus {
     CompFail(String),
 }
 
-fn run_test(ty_path: &Path, compiler_binary: &str) -> Result<TestStatus> {
+fn run_test(
+    ty_path: &Path,
+    compiler_binary: &str,
+    additional_args: &[String],
+) -> Result<TestStatus> {
     let run_compile = Command::new(compiler_binary)
         .arg(&ty_path)
         .args(["-o", "./a.out"])
@@ -75,7 +80,13 @@ fn run_test(ty_path: &Path, compiler_binary: &str) -> Result<TestStatus> {
         let mut process = Command::new("./a.out")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(|e| {
+                format!(
+                    "error running './a.out' for {}: {e}",
+                    ty_path.display()
+                )
+            })?;
 
         let mut stdout_str = String::new();
         if let Some(mut stdout) = process.stdout.take() {

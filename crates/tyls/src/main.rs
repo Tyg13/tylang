@@ -325,7 +325,7 @@ fn handle_open_or_change(
         }
         Err(e) => {
             let message = if let Some(s) = e.downcast_ref::<&str>() {
-                format!("Parser crashed: {s:?}!")
+                format!("Parser crashed: {s:?}")
             } else {
                 format!("Parser crashed!")
             };

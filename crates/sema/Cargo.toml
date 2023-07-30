@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 bir = { path = "../bir/" }
 bimap = "0.4.0"
+utils = { path = "../utils/" }

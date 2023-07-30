@@ -32,12 +32,13 @@ pub(super) fn fn_item(parser: &mut Parser<'_>) {
             parser.expect_token(T![->]);
             type_(parser);
         }
-        if parser.maybe(T!['{']) {
-            expressions::block(parser);
+        parser.expect_token(T![=]);
+        if expressions::expr(parser).is_some() {
             return;
+        } else {
+            parser.maybe_token(T![extern]);
+            parser.expect_token(T![;]);
         }
-        parser.maybe_token(T![extern]);
-        parser.expect_token(T![;]);
     });
 }
 

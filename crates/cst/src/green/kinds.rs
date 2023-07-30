@@ -10,7 +10,7 @@ pub enum SyntaxKind {
     MODULE,
 
     NAME,
-    DOTTED_NAME,
+    SCOPED_NAME,
 
     BASIC_TYPE,
     POINTER_TYPE,

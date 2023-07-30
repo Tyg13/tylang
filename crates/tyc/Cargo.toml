@@ -14,6 +14,7 @@ cst = { path = "../cst/" }
 parser = { path = "../parser/" }
 bir = { path = "../bir/" }
 lir = { path = "../lir/" }
+lir3 = { path = "../lir3/" }
 sema = { path = "../sema/" }
 itertools = "0.9.0"
 clap = { version = "3.2.22", features = ["derive"] }

@@ -5,6 +5,8 @@ pub use span::*;
 
 pub mod folding_set;
 pub mod intern_map;
+pub mod lru_cache;
+pub mod order_map;
 pub mod sparse_matrix;
 pub mod vec_graph;
 
@@ -31,4 +33,33 @@ pub fn join<T>(
         each(out, t)?;
     }
     Ok(())
+}
+
+#[macro_export]
+macro_rules! newtype_idx {
+    ($name:ident, $inner_ty:ty) => {
+        #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+        pub struct $name(pub(crate) $inner_ty);
+
+        impl From<usize> for $name {
+            fn from(v: usize) -> $name {
+                $name(v as $inner_ty)
+            }
+        }
+
+        impl From<$inner_ty> for $name {
+            fn from(v: $inner_ty) -> $name {
+                $name(v)
+            }
+        }
+
+        impl $name {
+            pub fn as_idx(self) -> usize {
+                self.0 as usize
+            }
+        }
+    };
+    ($name:ident) => {
+        newtype_idx!($name, u64);
+    };
 }

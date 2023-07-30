@@ -7,7 +7,25 @@ pub struct Parser<'tokens> {
     token_index: usize,
     events: Vec<Event>,
     follow_stack: Vec<HashSet<SyntaxKind>>,
-    steps: u64,
+    steps: Steps,
+}
+
+struct Steps {
+    counter: u64,
+    limit: u64,
+}
+
+impl Steps {
+    fn with_limit(limit: u64) -> Self {
+        Self { counter: 0, limit }
+    }
+
+    fn step_or_panic(&mut self, msg: &str) {
+        self.counter = self.counter.saturating_add(1);
+        if self.counter >= self.limit {
+            panic!("{msg}");
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +96,7 @@ impl<'tokens> Parser<'tokens> {
             token_index: 0,
             events: Default::default(),
             follow_stack: vec![Default::default()],
-            steps: 0,
+            steps: Steps::with_limit((tokens.size_hint() as u64) * 20),
         }
     }
 
@@ -156,15 +174,16 @@ impl<'tokens> Parser<'tokens> {
     }
 
     pub fn peek_next_non_trivia(&self) -> (SyntaxKind, usize) {
-        // Arbitrarily upper bound at 20 -- if we hit this limit, the assert
+        // Arbitrarily upper bound at 10 -- if we hit this limit, the assert
         // will fire and we can up the value.
-        for n in 0..20 {
+        const LIMIT: usize = 10;
+        for n in 0..LIMIT {
             let kind = self.lookahead(n);
             if !kind.is_trivia() {
                 return (kind, n);
             }
         }
-        panic!("way more trivia tokens than expected? (>20)")
+        panic!("way more trivia tokens than expected? (>{LIMIT})")
     }
 
     pub fn advance_to_next_non_trivia(&mut self) -> SyntaxKind {
@@ -247,10 +266,7 @@ impl<'tokens> Parser<'tokens> {
 
 impl Parser<'_> {
     pub(crate) fn step(&mut self) {
-        self.steps = self.steps.saturating_add(1);
-        if self.steps >= 1000000 {
-            panic!("parser might be stuck");
-        }
+        self.steps.step_or_panic("parser might be stuck!");
     }
 
     fn finish_node(&mut self) {

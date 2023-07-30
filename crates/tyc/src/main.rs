@@ -41,6 +41,8 @@ struct Args {
     optimize: bool,
     #[clap(short, long)]
     quiet: bool,
+    #[clap(long)]
+    lir: Option<usize>,
 }
 
 fn main() -> () {
@@ -79,7 +81,7 @@ fn main() -> () {
                     eprintln!("{error}");
                 }
             }
-            return Ok(());
+            return Err(Error::BuildingCST);
         }
         if let Some("cst") = action {
             if !args.quiet {
@@ -111,6 +113,12 @@ fn main() -> () {
         };
         if let Some("bir") = action {
             if !args.quiet {
+                for (id, kind) in module_bir.nodes() {
+                    eprintln!(
+                        "{id:?}: {kind:?}: {:?}",
+                        module_bir.ast(&id).map(|it| it.text())
+                    );
+                }
                 bir::print(&module_bir);
             }
             return Ok(());
@@ -156,41 +164,76 @@ fn main() -> () {
             return Err(Error::SemanticErrors(num_sema_errors));
         }
 
-        let mut module_lir = lir::translate(&module_bir, &module_sema);
-        if let Some("lir") = action {
-            lir::print(&module_lir);
-            if args.optimize {
-                lir::pass::run_pass(
-                    &mut module_lir,
-                    &mut lir::passes::JumpThreading,
-                );
-                lir::pass::run_pass(&mut module_lir, &mut lir::passes::DCE);
+        match args.lir {
+            None => {
+                handle_old_lir_action(module_bir, module_sema, action, &args)?;
             }
-            return Ok(());
+            Some(3) => {
+                let module_lir3 =
+                    lir3::lowering::lower(&module_bir, &module_sema);
+                lir3::verifier::verify(&module_lir3);
+                if let Some("lir") = action {
+                    lir3::printing::print(&module_lir3);
+                    return Ok(());
+                }
+                let action = extract_cg_action(action)?;
+                codegen::lir3::compile(
+                    &module_lir3,
+                    &args.input,
+                    args.output_path.as_deref(),
+                    action,
+                    args.optimize,
+                )
+            }
+            _ => {}
         }
-
-        let action = match action {
-            None | Some("compile") => codegen::Action::WriteExecutable,
-            Some("llvm-ir") => codegen::Action::WriteIr,
-            Some("asm") => codegen::Action::WriteAssembly,
-            Some("obj") => codegen::Action::WriteObject,
-            Some(action) => {
-                return Err(Error::UnknownAction(action.to_string()));
-            }
-        };
-        codegen::compile(
-            &module_lir,
-            &args.input,
-            args.output_path.as_deref(),
-            action,
-            args.optimize,
-        );
         Ok(())
     }()
     .unwrap_or_else(|e| {
         eprintln!("error: {e}");
         std::process::exit(1)
     });
+}
+
+fn handle_old_lir_action(
+    module_bir: bir::Map,
+    module_sema: sema::Map,
+    action: Option<&str>,
+    args: &Args,
+) -> Result<(), Error> {
+    let mut module_lir = lir::translate(&module_bir, &module_sema);
+    if let Some("lir") = action {
+        lir::print(&module_lir);
+        if args.optimize {
+            lir::pass::run_pass(
+                &mut module_lir,
+                &mut lir::passes::JumpThreading,
+            );
+            lir::pass::run_pass(&mut module_lir, &mut lir::passes::DCE);
+        }
+        return Ok(());
+    }
+    let action = extract_cg_action(action)?;
+    codegen::lir::compile(
+        &module_lir,
+        &args.input,
+        args.output_path.as_deref(),
+        action,
+        args.optimize,
+    );
+    Ok(())
+}
+
+fn extract_cg_action(action: Option<&str>) -> Result<codegen::Action, Error> {
+    Ok(match action {
+        None | Some("compile") => codegen::Action::WriteExecutable,
+        Some("llvm-ir") => codegen::Action::WriteIr,
+        Some("asm") => codegen::Action::WriteAssembly,
+        Some("obj") => codegen::Action::WriteObject,
+        Some(action) => {
+            return Err(Error::UnknownAction(action.to_string()));
+        }
+    })
 }
 
 fn parse_ast(input: &str) -> Result<Arc<ast::Module>, Error> {

@@ -1,8 +1,7 @@
 use std::sync::Arc;
+use utils::newtype_idx;
 
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-pub struct ID(pub usize);
+newtype_idx!(ID);
 
 type IDMap<V> = fxhash::FxHashMap<ID, V>;
 
@@ -31,8 +30,15 @@ pub struct Map {
 }
 
 impl Map {
+    pub fn nodes(&self) -> impl IntoIterator<Item = (ID, Kind)> + '_ {
+        self.nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, kind)| (ID(idx as u64), *kind))
+    }
+
     pub fn kind(&self, id: &ID) -> Kind {
-        self.nodes.get(id.0).cloned().unwrap()
+        self.nodes.get(id.as_idx()).cloned().unwrap()
     }
 
     pub fn ast(&self, id: &ID) -> Option<Arc<dyn ast::Node>> {
@@ -52,11 +58,11 @@ macro_rules! impl_map_lookup_fns {
                     self.$map_name.values()
                 }
                 pub fn $fn_name(&self, id: &ID) -> &$map_type {
-                    debug_assert_eq!(self.nodes[id.0], Kind::$map_type);
+                    debug_assert_eq!(self.nodes[id.as_idx()], Kind::$map_type);
                     self.$map_name.get(id).unwrap()
                 }
                 pub fn $fn_mut_name(&mut self, id: &ID) -> &mut $map_type {
-                    debug_assert_eq!(self.nodes[id.0], Kind::$map_type);
+                    debug_assert_eq!(self.nodes[id.as_idx()], Kind::$map_type);
                     self.$map_name.get_mut(id).unwrap()
                 }
             )*
@@ -88,7 +94,7 @@ impl_map_lookup_fns!(
     params    : Parameter = param    | param_mut
 );
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Module,
     Import,
@@ -102,6 +108,7 @@ pub enum Kind {
     Let,
     Expr,
     Literal,
+    Tombstone,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +261,24 @@ impl Function {
     pub fn body<'map>(&self, map: &'map Map) -> Option<&'map Block> {
         self.body.map(|id| map.block(&id))
     }
+
+    pub fn full_name<'map>(&self, map: &'map Map) -> String {
+        if self.is_extern {
+            return self.identifier.clone();
+        }
+        let mut parts = Vec::new();
+        let mut parent = Some(self.mod_);
+        while let Some(mod_) = parent {
+            let mod_ = map.mod_(&mod_);
+            if let Some(ref name) = mod_.ident {
+                parts.push(name.clone());
+            }
+            parent = mod_.parent;
+        }
+        parts.reverse();
+        parts.push(self.identifier.clone());
+        parts.join(".")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +417,13 @@ impl Expr {
             None
         }
     }
+
+    pub fn op(&self) -> Option<&Op> {
+        match &self.kind {
+            ExprKind::Op(op) => Some(op),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -463,42 +495,63 @@ pub struct StructLiteral {
 }
 
 #[derive(Debug, Clone)]
-pub struct Op {
-    pub fixity: OpFixity,
-    pub kind: OpKind,
-    pub operands: Vec<ID>,
+pub enum Op {
+    Prefix {
+        kind: PrefixOpKind,
+        arg: ID,
+    },
+    Postfix {
+        kind: PostfixOpKind,
+        arg: ID,
+    },
+    Binary {
+        kind: BinaryOpKind,
+        lhs: ID,
+        rhs: ID,
+    },
 }
 
 impl Op {
-    pub fn lhs(&self) -> ID {
-        assert!(matches!(self.fixity, OpFixity::Infix));
-        self.operands.get(0).copied().unwrap()
+    pub fn is_prefix(&self) -> bool {
+        matches!(self, Op::Prefix { .. })
     }
-    pub fn rhs(&self) -> ID {
-        assert!(matches!(self.fixity, OpFixity::Infix));
-        self.operands.get(1).copied().unwrap()
+    pub fn prefix_kind(&self) -> PrefixOpKind {
+        match self {
+            Op::Prefix { kind, .. } => *kind,
+            _ => panic!("not a prefix op!"),
+        }
+    }
+    pub fn prefix_arg(&self) -> ID {
+        match self {
+            Op::Prefix { arg, .. } => *arg,
+            _ => panic!("not a prefix op!"),
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpFixity {
-    Prefix,
-    Postfix,
-    Infix,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpKind {
+pub enum PrefixOpKind {
     Plus,
-    Minus,
-    Multiply,
-    Divide,
-    FieldAccess,
+    Negate,
+    Deref,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostfixOpKind {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOpKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    DotAccess,
+    ArrowAccess,
     LessThan,
     LessThanEquals,
     GreaterThan,
     GreaterThanEquals,
     NotEquals,
     Equals,
-    Assignment,
+    Assign,
 }

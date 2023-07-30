@@ -149,37 +149,14 @@ pub(super) fn block(parser: &mut Parser<'_>) -> CompletedMarker {
 }
 
 pub(super) fn block_inner(parser: &mut Parser<'_>) {
-    fn finish_previous_expr(
-        parser: &mut Parser<'_>,
-        previous_expr: Option<CompletedMarker>,
-        next: Option<SyntaxKind>,
-    ) {
-        if let Some(ref previous) = previous_expr {
-            if previous.kind().terminated_by_semicolon() && parser.maybe(T![;])
-            {
-                let stmt = previous.precede(parser);
-                parser.expect_token(T![;]);
-                stmt.complete(parser, EXPR_ITEM);
-            } else if next.map_or(true, |kind| !parser.maybe(kind)) {
-                let stmt = previous.precede(parser);
-                stmt.complete(parser, EXPR_ITEM);
-            }
-        }
-    }
-
-    let mut previous_expr: Option<CompletedMarker> = None;
     loop {
         parser.step();
         match parser.advance_to_next_non_trivia() {
             T![let] => {
-                finish_previous_expr(parser, previous_expr, None);
                 items::let_item(parser);
-                previous_expr = None;
             }
             T![fn] => {
-                finish_previous_expr(parser, previous_expr, None);
                 items::fn_item(parser);
-                previous_expr = None;
             }
             EOF => {
                 parser.unexpected(EOF);
@@ -187,9 +164,37 @@ pub(super) fn block_inner(parser: &mut Parser<'_>) {
             }
             T!['}'] => break,
             _ => {
-                finish_previous_expr(parser, previous_expr, Some(T!['}']));
-                let next = expr(parser);
-                previous_expr = next;
+                if let Some(expr) = expr(parser) {
+                    // Anything followed by a semicolon is an expr item,
+                    // even if it doesn't need to be terminated by a semicolon
+                    // (e.g. if expressions).
+                    if parser.maybe(T![;]) {
+                        let item = expr.precede(parser);
+                        parser.expect_token(T![;]);
+                        item.complete(parser, EXPR_ITEM);
+                        continue;
+                    }
+
+                    // Otherwise, we know there's no terminating semicolon.
+                    // If this expr must be terminated by a semicolon, then
+                    // it must be the last expression in the block.
+                    if expr.kind().terminated_by_semicolon() {
+                        break;
+                    }
+
+                    // Otherwise, this is an expression with no terminating
+                    // semicolon (and no semicolon at the current position).
+                    // Break if this is the last expr in the block.
+                    if parser.maybe(T!['}']) {
+                        break;
+                    }
+
+                    // Finally, we must have an expression with no terminating
+                    // semicolon, no semicolon at the current position, and
+                    // this *isn't* the last expr in the block (i.e. this is an item).
+                    // Convert the expr into an item and continue.
+                    expr.precede(parser).complete(parser, EXPR_ITEM);
+                }
             }
         }
     }
@@ -220,6 +225,7 @@ fn infix_op(parser: &mut Parser<'_>) -> Option<(SyntaxKind, usize, usize)> {
         T![!] if parser.at(T![!=]) => T![!=],
         T![<] if parser.at(T![<=]) => T![<=],
         T![>] if parser.at(T![>=]) => T![>=],
+        T![-] if parser.at(T![->]) => T![->],
         kind => kind,
     };
     let (left_binding, right_binding) = infix_binding_power(op_kind)?;
@@ -235,14 +241,14 @@ fn infix_binding_power(kind: SyntaxKind) -> Option<(usize, usize)> {
                | T![<]  | T![>]  => Some((2, 3)),
         T![+]  | T![-]           => Some((3, 4)),
         T![*]  | T![/]           => Some((4, 5)),
-        T![.]  | T![as]          => Some((5, 6)),
+        T![.]  | T![->] | T![as] => Some((5, 6)),
         _ => None,
     }
 }
 
 fn prefix_binding_power(kind: SyntaxKind) -> Option<((), usize)> {
     match kind {
-        T![-] | T![+] => Some(((), 5)),
+        T![-] | T![+] | T![*] => Some(((), 5)),
         _ => None,
     }
 }

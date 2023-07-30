@@ -140,6 +140,7 @@ dependencies = [
  "env_logger",
  "inkwell",
  "lir",
+ "lir3",
  "log",
  "sema",
  "utils",
@@ -406,6 +407,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lir3"
+version = "0.1.0"
+dependencies = [
+ "bir",
+ "sema",
+ "smallvec",
+ "utils",
+]
+
+[[package]]
 name = "llvm-sys"
 version = "140.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -646,6 +657,7 @@ version = "0.1.0"
 dependencies = [
  "bimap",
  "bir",
+ "utils",
 ]
 
 [[package]]
@@ -797,6 +809,7 @@ dependencies = [
  "env_logger",
  "itertools",
  "lir",
+ "lir3",
  "log",
  "parser",
  "pretty_assertions",

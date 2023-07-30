@@ -170,7 +170,7 @@ fn ident_is_basic_name(
         ast::Name::BasicName(n) => {
             n.ident().map_or(false, |n| n.syntax() == ident)
         }
-        ast::Name::DottedName(n) => n
+        ast::Name::ScopedName(n) => n
             .tail()
             .map_or(false, |tail| ident_is_basic_name(&tail, ident)),
     }

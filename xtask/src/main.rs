@@ -12,8 +12,8 @@ fn cargo() -> String {
     std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }
 
-fn build_package(proj: &str) -> Result<(), Error> {
-    let build = std::process::Command::new(cargo())
+fn build_package(cargo: &str, proj: &str) -> Result<(), Error> {
+    let build = std::process::Command::new(cargo)
         .args(&["build", "--package", proj])
         .status()?;
     if !build.success() {
@@ -23,12 +23,12 @@ fn build_package(proj: &str) -> Result<(), Error> {
 }
 
 fn ci() -> Result<(), Error> {
-    build_package("testc")?;
-    build_package("tyc")?;
+    let c = cargo();
+    build_package(&c, "testc")?;
+    build_package(&c, "tyc")?;
 
-    let unit_tests_pass = std::process::Command::new(cargo())
-        .args(&["test"])
-        .status()?;
+    let unit_tests_pass =
+        std::process::Command::new(c).args(&["test"]).status()?;
     let testc_tests_pass = std::process::Command::new("target/debug/testc")
         .args(&["target/debug/tyc", "tests/"])
         .status()?;

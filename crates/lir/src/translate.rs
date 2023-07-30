@@ -17,24 +17,6 @@ pub fn translate(bir: &bir::Map, sema: &sema::Map) -> Module {
 
     map_sema_tys_to_lir_tys(&mut builder);
 
-    let get_full_name = |f: &bir::Function| {
-        if f.is_extern {
-            return f.identifier.clone();
-        }
-        let mut parts = Vec::new();
-        let mut parent = Some(f.mod_);
-        while let Some(mod_) = parent {
-            let mod_ = builder.sess.bir.mod_(&mod_);
-            if let Some(ref name) = mod_.ident {
-                parts.push(name.clone());
-            }
-            parent = mod_.parent;
-        }
-        parts.reverse();
-        parts.push(f.identifier.clone());
-        parts.join(".")
-    };
-
     let mut fns_seen: HashMap<String, ValueID> = HashMap::new();
     let mut fns_with_unprocessed_bodies = Vec::new();
 
@@ -43,14 +25,14 @@ pub fn translate(bir: &bir::Map, sema: &sema::Map) -> Module {
             let sema = builder.sess.bir_to_sema(&bir_f.id);
             let sema_fn = builder.sess.sema.fn_(sema).unwrap();
 
-            let full_name = get_full_name(bir_f);
-
+            let full_name = bir_f.full_name(builder.sess.bir);
             if let Some(val) = fns_seen.get(&full_name) {
                 builder.sess.value_mapping.insert(sema, *val);
                 continue;
             }
 
-            let return_ty = builder.sess.sema_to_ty(&sema_fn.return_ty);
+            let fn_ty = sema_fn.ty(builder.sess.sema);
+            let return_ty = builder.sess.sema_to_ty(&fn_ty.return_ty);
             let mut param_names = Vec::new();
             let mut param_tys = Vec::new();
             for param in bir_f.parameters.iter() {
@@ -59,7 +41,6 @@ pub fn translate(bir: &bir::Map, sema: &sema::Map) -> Module {
                 param_names
                     .push(builder.sess.sema.name(sema).unwrap().ident.clone());
             }
-            let is_var_args = sema_fn.is_var_args(builder.sess.sema);
             let internal =
                 builder.sess.sema.num_callers(sema) > 0 && bir_f.body.is_some();
             let val = builder.new_function(
@@ -67,7 +48,7 @@ pub fn translate(bir: &bir::Map, sema: &sema::Map) -> Module {
                 param_names,
                 return_ty,
                 param_tys,
-                is_var_args,
+                fn_ty.is_var_args,
                 internal,
             );
             builder.sess.value_mapping.insert(sema, val);
@@ -248,6 +229,7 @@ fn literal(builder: &mut Builder, id: sema::ID) -> ValueRef {
             builder.new_int_constant(*v, builder.sess.sema_to_ty(&id))
         }
         sema::Constant::Str(s) => builder.new_str_constant(s),
+        sema::Constant::Struct => todo!(),
     }
 }
 
@@ -325,13 +307,7 @@ fn value(
                 }
             }
         }
-        bir::ExprKind::Op(op) => match &op.kind {
-            bir::OpKind::Assignment => assign_expr(builder, op),
-            bir::OpKind::FieldAccess => {
-                field_access_expr(builder, cat, lval, op, ty)
-            }
-            _ => op_expr(builder, ty, lval, op),
-        },
+        bir::ExprKind::Op(op) => op_expr(builder, ty, lval, cat, op),
         bir::ExprKind::Block { scope } => {
             scope_(builder, lval, builder.sess.bir.block(scope))
         }
@@ -391,12 +367,13 @@ fn field_access_expr(
     builder: &mut Builder,
     cat: ValueCategory,
     lval: Option<ValueRef>,
-    op: &bir::Op,
+    receiver: &bir::Expr,
+    field: &bir::Expr,
     ty: TyID,
 ) -> ValueRef {
-    let base = rvalue(builder, None, builder.sess.bir.expr(&op.operands[0]));
+    let base = rvalue(builder, None, receiver);
     let rhs = {
-        let sema = builder.sess.bir_to_sema(&op.operands[1]);
+        let sema = builder.sess.bir_to_sema(&field.id);
         let offset =
             builder.sess.sema.ty_member(sema).offset(builder.sess.sema);
         let ty = builder.sess.sema_to_ty(&sema);
@@ -423,9 +400,13 @@ fn field_access_expr(
     }
 }
 
-fn assign_expr(builder: &mut Builder, op: &bir::Op) -> ValueRef {
-    let to = lvalue(builder, builder.sess.bir.expr(&op.operands[0]));
-    rvalue(builder, Some(to), builder.sess.bir.expr(&op.operands[1]));
+fn assign_expr(
+    builder: &mut Builder,
+    dst: &bir::Expr,
+    src: &bir::Expr,
+) -> ValueRef {
+    let to = lvalue(builder, dst);
+    rvalue(builder, Some(to), src);
     to.dup()
 }
 
@@ -473,24 +454,40 @@ fn op_expr(
     builder: &mut Builder,
     ty: TyID,
     lval: Option<ValueRef>,
+    cat: ValueCategory,
     op: &bir::Op,
 ) -> ValueRef {
-    let lhs = rvalue(builder, None, builder.sess.bir.expr(&op.operands[0]));
-    let rhs = rvalue(builder, None, builder.sess.bir.expr(&op.operands[1]));
-    match &op.kind {
-        bir::OpKind::Plus => builder.new_add(lhs, rhs),
-        bir::OpKind::Minus => builder.new_sub(lhs, rhs),
-        bir::OpKind::Multiply => builder.new_mul(lhs, rhs),
-        bir::OpKind::Divide => builder.new_div(lhs, rhs),
-        bir::OpKind::LessThan => builder.new_cmp(CmpKind::Lt, lhs, rhs),
-        bir::OpKind::LessThanEquals => builder.new_cmp(CmpKind::Lte, lhs, rhs),
-        bir::OpKind::GreaterThan => builder.new_cmp(CmpKind::Gt, lhs, rhs),
-        bir::OpKind::GreaterThanEquals => {
-            builder.new_cmp(CmpKind::Gte, lhs, rhs)
+    let bir::Op::Binary { kind, lhs, rhs } = op else {
+        todo!()
+    };
+    use bir::BinaryOpKind as Kind;
+    let lhs = &builder.sess.bir.expr(lhs);
+    let rhs = &builder.sess.bir.expr(rhs);
+    match kind {
+        Kind::Assign => {
+            assert_ne!(cat, ValueCategory::LVal);
+            return assign_expr(builder, lhs, rhs);
         }
-        bir::OpKind::Equals => builder.new_cmp(CmpKind::Eq, lhs, rhs),
-        bir::OpKind::NotEquals => builder.new_cmp(CmpKind::Ne, lhs, rhs),
-        bir::OpKind::Assignment | bir::OpKind::FieldAccess => unreachable!(),
+        Kind::DotAccess => {
+            return field_access_expr(builder, cat, lval, lhs, rhs, ty);
+        }
+        _ => {}
+    };
+    let lhs = rvalue(builder, None, lhs);
+    let rhs = rvalue(builder, None, rhs);
+    match kind {
+        Kind::Add => builder.new_add(lhs, rhs),
+        Kind::Sub => builder.new_sub(lhs, rhs),
+        Kind::Mul => builder.new_mul(lhs, rhs),
+        Kind::Div => builder.new_div(lhs, rhs),
+        Kind::LessThan => builder.new_cmp(CmpKind::Lt, lhs, rhs),
+        Kind::LessThanEquals => builder.new_cmp(CmpKind::Lte, lhs, rhs),
+        Kind::GreaterThan => builder.new_cmp(CmpKind::Gt, lhs, rhs),
+        Kind::GreaterThanEquals => builder.new_cmp(CmpKind::Gte, lhs, rhs),
+        Kind::Equals => builder.new_cmp(CmpKind::Eq, lhs, rhs),
+        Kind::NotEquals => builder.new_cmp(CmpKind::Ne, lhs, rhs),
+        Kind::DotAccess | Kind::Assign => unreachable!(),
+        Kind::ArrowAccess => todo!(),
     }
     .of_ty(ty)
     .with_lval_or_new(lval)

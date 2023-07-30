@@ -3,9 +3,9 @@ use std::{
     assert_matches::debug_assert_matches,
     collections::{HashMap, HashSet},
 };
+use utils::newtype_idx;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ID(pub(crate) usize);
+newtype_idx!(ID);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -52,13 +52,13 @@ pub struct Map {
 impl Map {
     pub fn nodes(&self) -> impl Iterator<Item = (ID, Kind)> + '_ {
         self.nodes.iter().enumerate().filter_map(|(idx, &k)| {
-            (k != Kind::Tombstone).then_some((ID(idx), k))
+            (k != Kind::Tombstone).then_some((ID::from(idx), k))
         })
     }
 
     pub fn kind(&self, id: ID) -> Kind {
         self.nodes
-            .get(id.0)
+            .get(id.as_idx())
             .cloned()
             .expect("Internal map inconsistency")
     }
@@ -190,19 +190,19 @@ impl Map {
     }
 
     fn remove_node(&mut self, id: ID) {
-        self.nodes[id.0] = Kind::Tombstone;
+        self.nodes[id.as_idx()] = Kind::Tombstone;
         self.tombstones.push(id);
     }
 
     pub(crate) fn new_node(&mut self, kind: Kind) -> ID {
         let id = match self.tombstones.pop() {
             None => {
-                let new = ID(self.nodes.len());
+                let new = ID::from(self.nodes.len());
                 self.nodes.push(kind);
                 new
             }
             Some(id) => {
-                self.nodes[id.0] = kind;
+                self.nodes[id.as_idx()] = kind;
                 id
             }
         };
@@ -222,10 +222,18 @@ impl Map {
         id
     }
 
-    pub(crate) fn new_constant(&mut self, ty: ID, data: Constant) -> ID {
+    pub(crate) fn new_constant(
+        &mut self,
+        ty: ID,
+        data: Constant,
+        bir: Option<bir::ID>,
+    ) -> ID {
         let id = self.new_node(Kind::Constant);
         self.set_ty(id, ty);
         self.constants.insert(id, data);
+        if let Some(bir) = bir {
+            self.associate_bir_with_id(bir, id);
+        }
         id
     }
 
@@ -281,6 +289,7 @@ impl Map {
     }
 
     pub(crate) fn associate_bir_with_id(&mut self, bir: bir::ID, id: ID) {
+        eprintln!("associating bir::{bir:?} with sema::{id:?}");
         self.associated_bir_ids.entry(bir).or_default().push(id);
     }
 
@@ -335,7 +344,6 @@ pub(crate) struct PrototypeTy {
 pub(crate) struct PrototypeFn {
     pub id: ID,
     pub bir: bir::ID,
-    pub return_ty: ID,
 }
 
 impl PrototypeTy {
@@ -578,12 +586,12 @@ pub struct Var {
 pub enum Constant {
     Int(usize),
     Str(String),
+    Struct,
 }
 
 #[derive(Debug, Clone)]
 pub struct Function {
     pub id: ID,
-    pub return_ty: ID,
     pub params: Vec<ID>,
     pub prototype: bool,
 }
@@ -593,8 +601,8 @@ impl Function {
         map.try_get::<Name>(self.id)
     }
 
-    pub fn is_var_args(&self, map: &Map) -> bool {
-        map.ty(self.id).unwrap().as_fn_ty().is_var_args
+    pub fn ty<'m>(&self, map: &'m Map) -> FunctionType {
+        map.get::<Type>(self.id).as_fn_ty()
     }
 }
 
@@ -662,6 +670,10 @@ impl Namespace {
 
     pub fn kind(&self, map: &Map) -> Kind {
         map.kind(self.id)
+    }
+
+    pub fn ident<'map>(&self, map: &'map Map) -> Option<&'map str> {
+        map.name(self.id).map(|n| n.ident.as_str())
     }
 
     pub fn param<'map>(
@@ -787,7 +799,6 @@ impl<'map> NamespaceHandle<'map> {
         &mut self,
         ident: &str,
         bir: bir::ID,
-        return_ty: ID,
     ) -> PrototypeFn {
         let id = self.new_node(Kind::Function);
         self.add_name(id, ident);
@@ -795,12 +806,11 @@ impl<'map> NamespaceHandle<'map> {
             id,
             Function {
                 id,
-                return_ty,
                 params: Vec::new(),
                 prototype: true,
             },
         );
-        PrototypeFn { id, bir, return_ty }
+        PrototypeFn { id, bir }
     }
 
     pub(crate) fn new_param(&mut self, ident: &str) -> ID {

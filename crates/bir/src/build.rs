@@ -18,7 +18,6 @@ pub struct Builder {
     scope_stack: ScopeStack,
 
     string_literals: HashMap<String, ID>,
-    number_literals: HashMap<usize, ID>,
 }
 
 struct ScopeStack {
@@ -68,7 +67,6 @@ impl Builder {
             current_function: None,
             scope_stack: ScopeStack::new(),
             string_literals: HashMap::default(),
-            number_literals: HashMap::default(),
         }
     }
 
@@ -77,9 +75,32 @@ impl Builder {
     }
 
     fn new_node(&mut self, kind: Kind) -> ID {
-        let id = ID(self.map.nodes.len());
+        let id = ID::from(self.map.nodes.len());
         self.map.nodes.push(kind);
         id
+    }
+
+    pub fn unlink_node(&mut self, id: ID) {
+        let kind = &mut self.map.nodes[id.0 as usize];
+        match *kind {
+            Kind::Expr => {
+                self.map.exprs.remove(&id);
+            }
+            Kind::Module => todo!(),
+            Kind::Import => todo!(),
+            Kind::Function => todo!(),
+            Kind::Parameter => todo!(),
+            Kind::Name => todo!(),
+            Kind::TypeRef => todo!(),
+            Kind::TypeDef => todo!(),
+            Kind::Block => todo!(),
+            Kind::Item => todo!(),
+            Kind::Let => todo!(),
+            Kind::Literal => todo!(),
+            Kind::Tombstone => todo!(),
+        }
+        self.map.ast.remove(&id);
+        self.map.nodes[id.0 as usize] = Kind::Tombstone;
     }
 
     pub fn set_ast(&mut self, id: ID, ast: Arc<dyn ast::Node>) {
@@ -308,16 +329,9 @@ impl Builder {
                     id
                 }
             }
-            Literal::Number(n) => {
-                if let Some(&id) = self.number_literals.get(n) {
-                    return id;
-                } else {
-                    let id = self.new_node(Kind::Literal);
-                    self.number_literals.insert(*n, id);
-                    id
-                }
+            Literal::Number(..) | Literal::Struct(..) => {
+                self.new_node(Kind::Literal)
             }
-            Literal::Struct(..) => self.new_node(Kind::Literal),
         };
         self.map.literals.insert(id, literal);
         if let Some(ast) = ast {

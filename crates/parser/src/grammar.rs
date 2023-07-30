@@ -74,7 +74,7 @@ fn name(parser: &mut Parser<'_>) -> CompletedMarker {
     if parser.maybe(T![::]) {
         parser.expect_token(T![::]);
         name(parser);
-        m.complete(parser, DOTTED_NAME)
+        m.complete(parser, SCOPED_NAME)
     } else {
         m.complete(parser, NAME)
     }

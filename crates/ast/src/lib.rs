@@ -370,7 +370,7 @@ mod grammar {
         (arrow      : Token<DashArrow>)
         (return_ty  : Node <Type>     )
         (extern_    : Token<ExternKw> )
-        (block      : Node <Block>    )
+        (body       : Node <Expr >    )
         (semicolon  : Token<SemiColon>)
     });
     decl_node!(struct ExprItem: EXPR_ITEM {
@@ -413,12 +413,12 @@ mod grammar {
 
     decl_node_enum!(enum Name {
         BasicName(basic_name),
-        DottedName(dotted_name),
+        ScopedName(scoped_name),
     });
     decl_node!(struct BasicName: NAME {
         (ident: Token<Ident>)
     });
-    decl_node!(struct DottedName: DOTTED_NAME {
+    decl_node!(struct ScopedName: SCOPED_NAME {
         (head       : Token<Ident     >)
         (coloncolon : Token<ColonColon>)
         (tail       : Node <Name      >)
@@ -539,6 +539,7 @@ mod grammar {
     decl_token_enum!(enum PrefixOp {
         Plus(plus),
         Minus(minus),
+        Star(star),
     });
 
     decl_token_enum!(enum BinOp {
@@ -547,6 +548,7 @@ mod grammar {
         Star(star),
         Slash(slash),
         Dot(dot),
+        Arrow(arrow),
         Gt(gt),
         Lt(lt),
         Eq(eq),
@@ -572,6 +574,7 @@ mod grammar {
     decl_token!(struct And        : T![&&]);
     decl_token!(struct Assign     : T![=]);
     decl_token!(struct ColonColon : T![::]);
+    decl_token!(struct Arrow      : T![->]);
 
     decl_token!(struct Ident      : IDENT);
     decl_token!(struct Number     : NUMBER);

@@ -5,6 +5,7 @@ use utils::folding_set::{FoldID, FoldKey, Foldable, FoldingSet};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TyID(pub(crate) FoldID<Ty>);
+
 impl Foldable for TyID {
     fn fold(&self, key: &mut utils::folding_set::FoldKey) {
         self.0.fold(key);

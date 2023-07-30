@@ -1,4 +1,4 @@
-// Sketch:
+// finish(
 //  - Folding keys are bytestrings of arbitrary length
 //  => Select which bytes of data structure should be considered for folding
 //
@@ -11,19 +11,14 @@ use std::collections::HashMap;
 pub struct FoldKey(SmallVec<[u8; 8]>);
 
 impl FoldKey {
-    pub fn add<T: Foldable>(&mut self, val: &T) -> &mut Self {
+    pub fn add<T: Foldable>(&mut self, val: &T) {
         val.fold(self);
-        self
     }
 
-    pub fn add_all<T: Foldable>(
-        &mut self,
-        vals: impl IntoIterator<Item = T>,
-    ) -> &mut Self {
+    pub fn add_all<T: Foldable>(&mut self, vals: impl IntoIterator<Item = T>) {
         for val in vals {
             val.fold(self);
         }
-        self
     }
 }
 
@@ -227,6 +222,14 @@ impl<T: Foldable> FoldingSet<T> {
 
     pub fn try_get_from_key(&self, key: &FoldKey) -> Option<&T> {
         self.keys_to_ids.get(key).map(|id| self.get(id).unwrap())
+    }
+
+    pub fn id_from_key(&self, key: &FoldKey) -> Option<FoldID<T>> {
+        self.keys_to_ids.get(key).copied()
+    }
+
+    pub fn id_from_val(&self, val: &T) -> Option<FoldID<T>> {
+        self.id_from_key(&val.fold_key())
     }
 
     pub fn get(&self, id: &FoldID<T>) -> Option<&T> {

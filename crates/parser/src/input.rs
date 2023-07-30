@@ -16,6 +16,9 @@ impl TokenSource for TokenStream {
             .map(|token| token.text.as_ref())
             .unwrap_or_default()
     }
+    fn size_hint(&self) -> usize {
+        self.data.len()
+    }
 }
 
 pub struct TokenStream {

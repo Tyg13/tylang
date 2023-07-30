@@ -213,7 +213,6 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
         if DEBUG_IDS {
             w!(self, "{:?} ", expr.id);
         }
-        w!(self, "(");
         match &expr.kind {
             ExprKind::Literal(id) => {
                 if DEBUG_IDS {
@@ -257,7 +256,11 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
                 self.visit_expr(index);
                 w!(self, "]");
             }
-            ExprKind::Op(op) => self.visit_op(op),
+            ExprKind::Op(op) => {
+                w!(self, "(");
+                self.visit_op(op);
+                w!(self, ")");
+            }
             ExprKind::Block { scope: id } => {
                 self.visit_block(self.map.block(id));
             }
@@ -299,7 +302,6 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
                 self.visit_block(self.map.block(body));
             }
         };
-        w!(self, ")");
     }
 
     fn visit_name(&mut self, n: &Name) {
@@ -309,92 +311,37 @@ impl<'bir> Visitor<'bir> for Printer<'bir> {
 
 impl Printer<'_> {
     fn visit_op(&mut self, op: &Op) {
-        match (&op.fixity, &op.kind) {
-            (OpFixity::Infix, OpKind::Plus) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, " + ");
-                self.visit_expr(rhs);
+        match op {
+            Op::Prefix { kind, arg } => {
+                let prefix = match kind {
+                    PrefixOpKind::Plus => "+",
+                    PrefixOpKind::Negate => "-",
+                    PrefixOpKind::Deref => "*",
+                };
+                w!(self, "{prefix}");
+                self.visit_expr(self.map.expr(arg));
             }
-            (OpFixity::Infix, OpKind::Minus) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, " - ");
-                self.visit_expr(rhs);
+            Op::Postfix { kind, arg } => todo!(),
+            Op::Binary { kind, lhs, rhs } => {
+                let infix = match kind {
+                    BinaryOpKind::Add => " + ",
+                    BinaryOpKind::Sub => " - ",
+                    BinaryOpKind::Mul => " * ",
+                    BinaryOpKind::Div => " / ",
+                    BinaryOpKind::Assign => " = ",
+                    BinaryOpKind::DotAccess => ".",
+                    BinaryOpKind::ArrowAccess => "->",
+                    BinaryOpKind::LessThan => " < ",
+                    BinaryOpKind::LessThanEquals => " <= ",
+                    BinaryOpKind::GreaterThan => " > ",
+                    BinaryOpKind::GreaterThanEquals => " >= ",
+                    BinaryOpKind::Equals => " == ",
+                    BinaryOpKind::NotEquals => " != ",
+                };
+                self.visit_expr(self.map.expr(lhs));
+                w!(self, "{infix}");
+                self.visit_expr(self.map.expr(rhs));
             }
-            (OpFixity::Infix, OpKind::Multiply) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, " * ");
-                self.visit_expr(rhs);
-            }
-            (OpFixity::Infix, OpKind::Divide) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, " / ");
-                self.visit_expr(rhs);
-            }
-            (OpFixity::Infix, OpKind::Assignment) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, " = ");
-                self.visit_expr(rhs);
-            }
-            (OpFixity::Infix, OpKind::FieldAccess) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, ".");
-                self.visit_expr(rhs);
-            }
-            (OpFixity::Infix, OpKind::LessThan) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, " < ");
-                self.visit_expr(rhs);
-            }
-            (OpFixity::Infix, OpKind::LessThanEquals) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, " <= ");
-                self.visit_expr(rhs);
-            }
-            (OpFixity::Infix, OpKind::GreaterThan) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, " > ");
-                self.visit_expr(rhs);
-            }
-            (OpFixity::Infix, OpKind::GreaterThanEquals) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, " >= ");
-                self.visit_expr(rhs);
-            }
-            (OpFixity::Infix, OpKind::Equals) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, " == ");
-                self.visit_expr(rhs);
-            }
-            (OpFixity::Infix, OpKind::NotEquals) => {
-                let lhs = self.map.expr(&op.operands[0]);
-                let rhs = self.map.expr(&op.operands[1]);
-                self.visit_expr(lhs);
-                w!(self, " != ");
-                self.visit_expr(rhs);
-            }
-            _ => unreachable!(),
         }
     }
 }

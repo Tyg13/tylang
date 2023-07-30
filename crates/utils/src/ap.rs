@@ -16,10 +16,13 @@ impl Int {
     pub fn big(parts: Vec<u64>, bit_width: u64) -> Self {
         debug_assert!(parts.len() >= 2);
 
-        let leading_parts_width = (parts.len() - 1) as u64 * 64;
-        let last_part_width = width(*parts.last().unwrap());
-        let parts_bit_width = leading_parts_width + last_part_width;
-        debug_assert!(parts_bit_width <= bit_width);
+        #[cfg(debug)]
+        {
+            let leading_parts_width = (parts.len() - 1) as u64 * 64;
+            let last_part_width = width(*parts.last().unwrap());
+            let parts_bit_width = leading_parts_width + last_part_width;
+            assert!(parts_bit_width <= bit_width);
+        }
 
         Self {
             storage: IntStorage::Big(parts),
