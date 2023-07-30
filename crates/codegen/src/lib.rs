@@ -308,7 +308,11 @@ fn visit_inst<'ctx>(
         }
         InstKind::Load => {
             let ptr = visit_lvalue(c, ctx, &inst.rvals[0]).into_pointer_value();
-            Some(Value::Val(c.builder.build_load(ptr, "load")))
+            Some(Value::Val(c.builder.build_load(
+                ptr.get_type(),
+                ptr,
+                "load",
+            )))
         }
         InstKind::Store => {
             Some(Value::Val(visit_rvalue(c, ctx, &inst.rvals[0])))
@@ -323,7 +327,12 @@ fn visit_inst<'ctx>(
                 .map(|v| visit_rvalue(c, ctx, v).into_int_value())
                 .collect();
             Some(Value::Addr(unsafe {
-                c.builder.build_in_bounds_gep(base, &indices, "subscr")
+                c.builder.build_in_bounds_gep(
+                    base.get_type(),
+                    base,
+                    &indices,
+                    "subscr",
+                )
             }))
         }
         InstKind::Add => {
@@ -438,7 +447,12 @@ fn visit_inst<'ctx>(
                 .unwrap();
             Some(Value::Val(
                 c.builder
-                    .build_struct_gep(base, index as u32, "index")
+                    .build_struct_gep(
+                        base.get_type(),
+                        base,
+                        index as u32,
+                        "index",
+                    )
                     .unwrap()
                     .as_basic_value_enum(),
             ))
@@ -502,7 +516,9 @@ fn visit_any_value<'ctx>(
         {
             Value::Val(v) => v.into(),
             Value::Addr(a) => match cat {
-                ValueCategory::RVal => c.builder.build_load(a, "copy").into(),
+                ValueCategory::RVal => {
+                    c.builder.build_load(a.get_type(), a, "copy").into()
+                }
                 ValueCategory::LVal => a.into(),
             },
         },
