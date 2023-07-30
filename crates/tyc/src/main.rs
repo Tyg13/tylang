@@ -77,7 +77,7 @@ fn main() -> () {
                     eprintln!("{error}");
                 }
             }
-            return Ok(());
+            return Err(Error::BuildingCST);
         }
         if let Some("cst") = action {
             if !args.quiet {
