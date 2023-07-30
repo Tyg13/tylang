@@ -1,0 +1,16 @@
+fn printf(msg: str, ...);
+fn puts(msg: str);
+
+fn main(argc: i32, argv: *str) -> i32 {
+    let i: i32 = 0;
+    loop {
+       if i < argc {
+         puts(argv[i as i64]);
+         i = i + 1;
+         continue;
+       }
+       break 0;
+    }
+    printf("num args: %d\n", i);
+    0
+}

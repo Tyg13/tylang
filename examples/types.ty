@@ -1,0 +1,10 @@
+type A { b: B, c: B }
+type B {}
+
+fn puts(msg: *i8) -> i8;
+
+fn foo() -> i32 {
+  let s = "abc";
+  let i = 10;
+  0
+}

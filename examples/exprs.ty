@@ -1,0 +1,13 @@
+fn print(_: i32) -> void;
+
+fn let_with_block(n: i32) -> i32 {
+    let a: i32 = { print(n); n + 1 };
+    let b = { n + a };
+    a + b
+}
+
+fn let_with_paren(n: i16) -> i16 {
+    let a: i16 = (n + 2);
+    let b = (n + 1);
+    (a + b)
+}

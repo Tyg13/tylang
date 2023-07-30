@@ -1,0 +1,8 @@
+fn printf(msg: str, ...);
+
+fn main() {
+    let i: i32 = 1;
+    if i > 0 {
+        printf("%d\n", i);
+    }
+}

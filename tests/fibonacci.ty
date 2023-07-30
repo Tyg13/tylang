@@ -1,0 +1,14 @@
+fn printf(fmt: str, ...) -> i32 = extern;
+
+fn fibonacci(n: i64) -> i64 = {
+    if n <= 1 {
+        return 1;
+    }
+    fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+fn main(argc: i32, argv: *str) -> i32 = {
+    printf("fib(2) == %d\n", fibonacci(2));
+    printf("fib(5) == %d\n", fibonacci(5));
+    0
+}

@@ -1,0 +1,4 @@
+fn foo(i: i8, j: i16) -> i64 {
+    let k: i32 = i + j;
+    k + 10
+}

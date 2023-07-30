@@ -1,0 +1,5 @@
+fn foo() {
+    let ex = 10 + 10 + 10;
+    let s = "a";
+    let a = "a";
+}
