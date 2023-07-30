@@ -6,23 +6,37 @@ const MAX_RUN_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+fn check_exists(kind: &str, path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Err(format!(
+            "given {} `{}` does not exist!",
+            kind,
+            path.display()
+        ))?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     if std::env::args().count() < 3 {
         eprintln!("USAGE: <compiler> <run-dir>");
         std::process::exit(1);
     }
-    let compiler_binary = std::env::args().nth(1).unwrap();
-    let run_dir = std::env::args().nth(2).unwrap();
+    let compiler_binary = std::env::args().nth(1).map(PathBuf::from).unwrap();
+    let run_dir = std::env::args().nth(2).map(PathBuf::from).unwrap();
+
+    check_exists("compiler binary", &compiler_binary)?;
+    check_exists("run dir", &run_dir)?;
 
     let pattern = PathBuf::from(run_dir).join("*.ty");
 
     let mut num_tests = 0;
     let mut num_passes = 0;
     for ty_file in glob::glob(pattern.to_str().unwrap())? {
-        let ty_file = ty_file?;
+        let ty_file = ty_file.unwrap();
 
         num_tests += 1;
-        match run_test(&ty_file, &compiler_binary)? {
+        match run_test(&ty_file, &compiler_binary).unwrap() {
             TestStatus::Pass => {
                 num_passes += 1;
             }
@@ -58,7 +72,7 @@ enum TestStatus {
     CompFail(String),
 }
 
-fn run_test(ty_path: &Path, compiler_binary: &str) -> Result<TestStatus> {
+fn run_test(ty_path: &Path, compiler_binary: &Path) -> Result<TestStatus> {
     let run_compile = Command::new(compiler_binary)
         .arg(&ty_path)
         .args(["-o", "./a.out"])
