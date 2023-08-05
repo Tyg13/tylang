@@ -633,6 +633,7 @@ pub fn compile(
     let module = context.create_module(source_file);
     let builder = context.create_builder();
     let _execution_engine = module.create_execution_engine().unwrap();
+    llvm::ExecutionEngine::link_in_interpreter();
 
     let output_path = output_path.map(|path| PathBuf::from(path));
 

@@ -15,6 +15,7 @@ pub(crate) mod llvm {
         PointerValue,
     };
     pub use inkwell::{AddressSpace, OptimizationLevel};
+    pub use inkwell::execution_engine::ExecutionEngine;
 }
 
 pub enum Action {
