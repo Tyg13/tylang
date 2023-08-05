@@ -2,6 +2,7 @@ pub(crate) mod llvm {
     pub use inkwell::basic_block::BasicBlock;
     pub use inkwell::builder::Builder;
     pub use inkwell::context::Context;
+    pub use inkwell::execution_engine::ExecutionEngine;
     pub use inkwell::module::{Linkage, Module};
     pub use inkwell::passes::{PassManager, PassManagerBuilder};
     pub use inkwell::targets::{
@@ -15,7 +16,6 @@ pub(crate) mod llvm {
         PointerValue,
     };
     pub use inkwell::{AddressSpace, OptimizationLevel};
-    pub use inkwell::execution_engine::ExecutionEngine;
 }
 
 pub enum Action {

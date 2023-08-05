@@ -329,12 +329,7 @@ fn visit_inst<'ctx>(
                 .collect();
             let ty = c.translate_type(target.ty(ctx));
             let ptr = unsafe {
-                c.builder.build_in_bounds_gep(
-                    ty,
-                    base,
-                    &indices,
-                    "subscr",
-                )
+                c.builder.build_in_bounds_gep(ty, base, &indices, "subscr")
             };
             Some(Value::Addr(ptr, ty))
         }
