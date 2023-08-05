@@ -17,15 +17,15 @@ pub struct ValueID(u32);
 
 impl ValueID {
     #[inline]
-    pub fn local(id: usize) -> Self {
+    pub fn local(id: u32) -> Self {
         debug_assert!(id < (1 << 31));
-        Self(id as u32)
+        Self(id)
     }
 
     #[inline]
-    pub fn global(id: usize) -> Self {
+    pub fn global(id: u32) -> Self {
         debug_assert!(id < (1 << 31));
-        Self((id as u32) | (1 << 31))
+        Self(id | (1 << 31))
     }
 
     #[inline]
@@ -292,7 +292,7 @@ impl Values {
         global: bool,
     ) -> ValueID {
         let id = {
-            let idx = self.vals.len();
+            let idx: u32 = self.vals.len().try_into().expect("ID overflow!");
             if global {
                 ValueID::global(idx)
             } else {
