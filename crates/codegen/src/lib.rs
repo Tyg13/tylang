@@ -307,9 +307,10 @@ fn visit_inst<'ctx>(
             Some(Value::Val(val))
         }
         InstKind::Load => {
-            let ptr = visit_lvalue(c, ctx, &inst.rvals[0]).into_pointer_value();
+            let target = inst.rvals[0];
+            let ptr = visit_lvalue(c, ctx, &target).into_pointer_value();
             Some(Value::Val(c.builder.build_load(
-                ptr.get_type(),
+                c.translate_type(target.ty(ctx)),
                 ptr,
                 "load",
             )))
@@ -318,22 +319,24 @@ fn visit_inst<'ctx>(
             Some(Value::Val(visit_rvalue(c, ctx, &inst.rvals[0])))
         }
         InstKind::Subscript => {
-            let base =
-                visit_rvalue(c, ctx, &inst.rvals[0]).into_pointer_value();
+            let target = inst.rvals[0];
+            let base = visit_rvalue(c, ctx, &target).into_pointer_value();
             let indices: Vec<_> = inst
                 .rvals
                 .iter()
                 .skip(1)
                 .map(|v| visit_rvalue(c, ctx, v).into_int_value())
                 .collect();
-            Some(Value::Addr(unsafe {
+            let ty = c.translate_type(target.ty(ctx));
+            let ptr = unsafe {
                 c.builder.build_in_bounds_gep(
-                    base.get_type(),
+                    ty,
                     base,
                     &indices,
                     "subscr",
                 )
-            }))
+            };
+            Some(Value::Addr(ptr, ty))
         }
         InstKind::Add => {
             let lhs = visit_rvalue(c, ctx, &inst.rvals[0]).into_int_value();
@@ -399,7 +402,7 @@ fn visit_inst<'ctx>(
         InstKind::Var => {
             let ty = c.translate_type(inst.lval().ty(ctx));
             let alloca = c.builder.build_alloca(ty, &inst.ident(ctx.as_fn()));
-            Some(Value::Addr(alloca))
+            Some(Value::Addr(alloca, ty))
         }
         InstKind::Cmp { kind } => {
             use lir::CmpKind;
@@ -411,9 +414,14 @@ fn visit_inst<'ctx>(
                 CmpKind::Gte => inkwell::IntPredicate::SGE,
                 CmpKind::Lte => inkwell::IntPredicate::SLE,
             };
-            let lhs = visit_rvalue(c, ctx, &inst.rvals[0]).into_int_value();
-            let rhs = visit_rvalue(c, ctx, &inst.rvals[1]).into_int_value();
-            let cmp = c.builder.build_int_compare(predicate, lhs, rhs, "cmp");
+            let lhs = visit_rvalue(c, ctx, &inst.rvals[0]);
+            let rhs = visit_rvalue(c, ctx, &inst.rvals[1]);
+            let cmp = c.builder.build_int_compare(
+                predicate,
+                lhs.into_int_value(),
+                rhs.into_int_value(),
+                "cmp",
+            );
             Some(Value::Val(cmp.as_basic_value_enum()))
         }
         InstKind::Cast => {
@@ -462,7 +470,7 @@ fn visit_inst<'ctx>(
     if let Some(lval) = inst.lval {
         let result = result.unwrap();
         match c.values.get(&lval.id) {
-            Some(Value::Addr(addr)) => {
+            Some(Value::Addr(addr, _)) => {
                 c.builder.build_store(*addr, *result.as_val());
             }
             _ => {
@@ -515,9 +523,9 @@ fn visit_any_value<'ctx>(
             .expect(&format!("no key: {:?}", value.id))
         {
             Value::Val(v) => v.into(),
-            Value::Addr(a) => match cat {
+            Value::Addr(a, ty) => match cat {
                 ValueCategory::RVal => {
-                    c.builder.build_load(a.get_type(), a, "copy").into()
+                    c.builder.build_load(ty, a, "copy").into()
                 }
                 ValueCategory::LVal => a.into(),
             },

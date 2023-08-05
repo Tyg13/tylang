@@ -27,12 +27,12 @@ pub enum Action {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) enum Value<'ctx> {
     Val(llvm::BasicValueEnum<'ctx>),
-    Addr(llvm::PointerValue<'ctx>),
+    Addr(llvm::PointerValue<'ctx>, llvm::BasicTypeEnum<'ctx>),
 }
 
 impl<'ctx> Value<'ctx> {
     pub fn as_addr(&self) -> &llvm::PointerValue<'ctx> {
-        if let Self::Addr(addr) = self {
+        if let Self::Addr(addr, _) = self {
             addr
         } else {
             panic!("not an addr!")
