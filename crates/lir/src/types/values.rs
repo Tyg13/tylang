@@ -292,11 +292,14 @@ impl Values {
         global: bool,
     ) -> ValueID {
         let id = {
-            let idx: u32 = self.vals.len().try_into().expect("ID overflow!");
+            let idx = self.vals.len();
+            if idx > (1 << 31) {
+                panic!("ID overflow!");
+            };
             if global {
-                ValueID::global(idx)
+                ValueID::global(idx as u32)
             } else {
-                ValueID::local(idx)
+                ValueID::local(idx as u32)
             }
         };
         self.vals.push(Value { id, kind });
