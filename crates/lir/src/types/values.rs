@@ -16,16 +16,18 @@ impl<'v> Iterator for Users<'v> {
 pub struct ValueID(u32);
 
 impl ValueID {
+    pub const ID_MAX: usize = (1 << 31);
+
     #[inline]
-    pub fn local(id: u32) -> Self {
-        debug_assert!(id < (1 << 31));
-        Self(id)
+    pub fn local(id: usize) -> Self {
+        debug_assert!(id < Self::ID_MAX);
+        Self(id as u32)
     }
 
     #[inline]
-    pub fn global(id: u32) -> Self {
-        debug_assert!(id < (1 << 31));
-        Self(id | (1 << 31))
+    pub fn global(id: usize) -> Self {
+        debug_assert!(id < Self::ID_MAX);
+        Self((id as u32) | (1 << 31))
     }
 
     #[inline]
@@ -293,13 +295,10 @@ impl Values {
     ) -> ValueID {
         let id = {
             let idx = self.vals.len();
-            if idx > (1 << 31) {
-                panic!("ID overflow!");
-            };
             if global {
-                ValueID::global(idx as u32)
+                ValueID::global(idx)
             } else {
-                ValueID::local(idx as u32)
+                ValueID::local(idx)
             }
         };
         self.vals.push(Value { id, kind });
