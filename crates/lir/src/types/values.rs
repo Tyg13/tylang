@@ -16,17 +16,17 @@ impl<'v> Iterator for Users<'v> {
 pub struct ValueID(u32);
 
 impl ValueID {
-    pub const ID_MAX: usize = (1 << 31);
+    pub const MAX: usize = (1 << 31);
 
     #[inline]
     pub fn local(id: usize) -> Self {
-        debug_assert!(id < Self::ID_MAX);
+        debug_assert!(id < Self::MAX);
         Self(id as u32)
     }
 
     #[inline]
     pub fn global(id: usize) -> Self {
-        debug_assert!(id < Self::ID_MAX);
+        debug_assert!(id < Self::MAX);
         Self((id as u32) | (1 << 31))
     }
 
